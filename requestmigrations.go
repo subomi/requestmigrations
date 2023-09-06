@@ -83,8 +83,8 @@ func (rm *RequestMigration) RegisterMigrations(migrations Migrations) error {
 	return nil
 }
 
-func (rm *RequestMigration) VersionAPI(next http.HandlerFunc) http.HandlerFunc {
-	return func(resp http.ResponseWriter, req *http.Request) {
+func (rm *RequestMigration) VersionAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		// apply migrations
 		from, err := rm.getUserVersion(req)
 		if err != nil {
@@ -113,7 +113,7 @@ func (rm *RequestMigration) VersionAPI(next http.HandlerFunc) http.HandlerFunc {
 		defer m.reverseMigrations(wresp, resp)
 
 		next.ServeHTTP(wresp, req)
-	}
+	})
 }
 
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
