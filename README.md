@@ -1,48 +1,37 @@
-# atl
-`atl` is an acronym for API Translation Layer. The goal is to build a library that can be embedded direclty into your Go REST APIs to provide request and response translation for your API, making it backwards-compatible, and giving you the freedom to continue releasing new versions of your API. It this is known as [rolling versions](https://stripe.com/blog/api-versioning) popularised by Stripe.
+# requestmigrations
+`requestmigrations` is a Golang implementation of [rolling versions](https://stripe.com/blog/api-versioning) for REST APIs. It's a port of the [Ruby implementation](https://github.com/keygen-sh/request_migrations) by [ezekg](https://github.com/ezekg)
+
+## Features
+- API Versioning with date and semver versioning support.
+- Prometheus Instrumentation to track and optimize slow transformations.
+- Progressive versioning support - roll out versioning to a subset of your users.
+
+## Installation
+```bash
+ $ go get github.com/subomi/requestmigrations 
+```
+
+## Usage
+This package only exposes one API - `VersionAPI` which is an HTTP middleware to intercept and apply transformations on requests and responses to your REST API. You can find a complete example in the [example directory](https://github.com/subomi/requestmigrations/tree/main/example). See an abridged example below:
+```go 
+package main
+
+func main() {
+    rms := rm.NewRequestMigration(opts)
+
+    r := mux.NewRouter()
+    r.use(rms.VersionAPI)
+
+    r.HandleFunc("/users", ListUsers).Methods("GET")
+}
+```
+See the [example directory](https://github.com/subomi/requestmigrations/tree/main/example) for a detailed example.
+
+## Benchmarks
+
+## Limitations
+This package depends on `httptest.ResponseRecorder`. There are valid concerns as to why this shouldn't be used in the production code, see [here](https://stackoverflow.com/a/52810532). Implementing `ResponseRecorder` that can be used in production requires more knowledge of the http library than I currently know, the plan is to do in this in the nearest future. Be advised. 
 
 
-## Rolling Versions vs. Traditional Versioning
-- Rolling Version is Progressive. Traditional Versioning is a big bang.
-- Rolling Version has a superior developer experience. Traditional Versioning has a poorer developer experience.
-
-## High Level Algorithm
-- For every req, 
-    - Identify diff between the most list of differences from the beginning to the end.
-    - Apply the differences in the order for the request
-    - Apply the differences in reverse for the response.
-
-
-To achieve rolling versions, we need a layer before our http handlers, that can identify our current API version, perform a diff of changes from our selected version to the most recent version. We will also want to achieve this without refactoring all our handlers as well as deploying a new API Gateway. To this end, we want to build API Gateway like features directly into our binary to enable us transform request and response up and down. We also want to do this and minimize the amount of latency we are adding to every API Call. 
-
-## Design 
-
-### Goals
-1. Minimize the added latency to each request.
-2. Work with existing APIs without the need to refactor the `HTTP` Handlers.
-3. Don't couple with third-party proxies like `Kong`, `Tyk` etc.
-
-### Options
-To achieve this there are various options with their pros & cons. Let's iterate over each option and discuss them. 
-
-#### Add a Reverse Proxy
-Create a reverse proxy that listens on a separate port, receives requests, transforms them and forwards to the actual server.
-
-1. First we will create a new reverse proxy server on a new port.
-2. For every request, 
-    - Determine the `diff`.
-    - Let `req := transformRequest(diff, req)`.
-    - Add Diff Header to the request like `X-ATL-Diffs: abc:edf:ghi`
-3. For every response,
-    - Retrieve the Diff Header. 
-    - Let `res := transformResponse(diff, res)`.
-    - Write `res` to `ResponseWriter`.
-
-#### Wrap ResponseWriter Type
-3. Wrap `http.ResponseWriter`. This would require deeper knowledge of the `http` package that I don't have. The problem is `ResponseWriter` implements multiple types. See [here](https://github.com/felixge/httpsnoop#why-this-package-exists)
-
-#### Create a new Response Type
-Create a new return type. This would mean refactor all our handlers.
-
-#### Deploy a third-paty API Gateway
-Excellent option if you don't mind deploying another software. In fact, you can do this at the edge with [Cloudflare Workers](https://workers.cloudflare.com/)
+## License
+MIT License
