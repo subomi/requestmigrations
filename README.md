@@ -4,7 +4,9 @@
 ## Features
 - API Versioning with date and semver versioning support.
 - Prometheus Instrumentation to track and optimize slow transformations.
-- Progressive versioning support - roll out versioning to a subset of your users.
+- Progressive versioning support - roll out versioning to a subset of your users. (Coming soon)
+- Include/Exclude specific routes entirely. (Coming soon)
+- Support arbitrary data migration. (Coming soon)
 
 ## Installation
 ```bash
@@ -32,6 +34,9 @@ See the [example directory](https://github.com/subomi/requestmigrations/tree/mai
 ## Limitations
 This package depends on `httptest.ResponseRecorder`. There are valid concerns as to why this shouldn't be used in the production code, see [here](https://stackoverflow.com/a/52810532). Implementing `ResponseRecorder` that can be used in production requires more knowledge of the http library than I currently know, the plan is to do in this in the nearest future. Be advised. 
 
+
+## Roadmap
+- [ ] Automatically add migration 0.
 
 ## License
 MIT License

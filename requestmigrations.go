@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type VersionFormat string
@@ -20,11 +20,12 @@ const (
 )
 
 var (
-	ErrorInvalidVersion       = errors.New("Invalid version number")
-	ErrorInvalidVersionFormat = errors.New("Invalid version format")
+	ErrServerError          = errors.New("Server error")
+	ErrInvalidVersion       = errors.New("Invalid version number")
+	ErrInvalidVersionFormat = errors.New("Invalid version format")
 )
 
-//	migrations := map[string][]Migration{
+//	migrations := Migrations{
 //		"2023-02-28": []Migration{
 //			Migration{},
 //			Migration{},
@@ -33,94 +34,169 @@ var (
 type Migrations map[string][]Migration
 
 type Migration interface {
-	GetName() string
-
-	ShouldMigrateRequest() bool
+	ShouldMigrateRequest(req *http.Request) bool
 	MigrateRequest(req *http.Request) error
 
-	ShouldMigrateResponse() bool
+	ShouldMigrateResponse(res *http.Response) bool
 	MigrateResponse(res *http.Response) error
 }
 
+type GetUserHeaderFunc func(req *http.Request) (string, error)
+type ShouldVersionActor func(req *http.Request) (bool, error)
+
 type RequestMigrationOptions struct {
-	VersionHeader  string
-	CurrentVersion string
-	DefaultVersion string
-	VersionFormat  VersionFormat
+	VersionHeader      string
+	CurrentVersion     string
+	GetUserHeaderFunc  GetUserHeaderFunc
+	ShouldVersionActor ShouldVersionActor
+	VersionFormat      VersionFormat
 }
 
 type RequestMigration struct {
-	opts *RequestMigrationOptions
+	opts     *RequestMigrationOptions
+	versions []*Version
+	Metric   *prometheus.HistogramVec
+	iv       string
 
 	mu         sync.Mutex
 	migrations Migrations
-	versions   []*Version
 }
 
 func NewRequestMigration(opts *RequestMigrationOptions) *RequestMigration {
-	return &RequestMigration{opts: opts}
+	me := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "requestmigrations_seconds",
+		Help: "The latency of request migrations from one version to another.",
+	}, []string{"from", "to"})
+
+	var iv string
+	if opts.VersionFormat == DateFormat {
+		iv = new(time.Time).Format(time.DateOnly)
+	} else if opts.VersionFormat == SemverFormat {
+		iv = "v0"
+	}
+
+	migrations := Migrations{
+		iv: []Migration{},
+	}
+
+	var versions []*Version
+	versions = append(versions, &Version{Format: opts.VersionFormat, Value: iv})
+
+	return &RequestMigration{
+		opts:       opts,
+		Metric:     me,
+		iv:         iv,
+		versions:   versions,
+		migrations: migrations,
+	}
 }
 
 func (rm *RequestMigration) RegisterMigrations(migrations Migrations) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
-	rm.migrations = migrations
-
-	for k, _ := range rm.migrations {
+	for k, v := range migrations {
+		rm.migrations[k] = v
 		rm.versions = append(rm.versions, &Version{Format: rm.opts.VersionFormat, Value: k})
 	}
 
 	switch rm.opts.VersionFormat {
 	case SemverFormat:
-		sort.Slice(rm.versions, SemVerSorter(rm.versions))
+		sort.Slice(rm.versions, semVerSorter(rm.versions))
 	case DateFormat:
-		sort.Slice(rm.versions, DateVersionSorter(rm.versions))
+		sort.Slice(rm.versions, dateVersionSorter(rm.versions))
 	default:
-		return ErrorInvalidVersionFormat
+		return ErrInvalidVersionFormat
 	}
 
 	return nil
 }
 
 func (rm *RequestMigration) VersionAPI(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-		// apply migrations
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if rm.opts.ShouldVersionActor != nil {
+			ok, err := rm.opts.ShouldVersionActor(req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			if !ok {
+				next.ServeHTTP(w, req)
+				return
+			}
+		}
+
 		from, err := rm.getUserVersion(req)
 		if err != nil {
-			// bypass versioning entirely
-			next.ServeHTTP(resp, req)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		to := rm.getCurrentVersion()
 		m, err := NewMigrator(from, to, rm.versions, rm.migrations)
 		if err != nil {
-			// bypass versioning entirely
-			next.ServeHTTP(resp, req)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		err = m.applyMigrations(req)
+		if from.Equal(to) {
+			next.ServeHTTP(w, req)
+			return
+		}
+
+		startTime := time.Now()
+		defer func() {
+			finishTime := time.Now()
+			latency := finishTime.Sub(startTime)
+
+			h, err := rm.Metric.GetMetricWith(
+				prometheus.Labels{
+					"from": from.String(),
+					"to":   to.String()})
+			if err != nil {
+				// do nothing.
+				return
+			}
+
+			h.Observe(latency.Seconds())
+		}()
+
+		err = m.applyRequestMigrations(req)
 		if err != nil {
-			// bypass versioning entirely
-			next.ServeHTTP(resp, req)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		// set up reverse migrations
-		wresp := httptest.NewRecorder()
-		defer m.reverseMigrations(wresp, resp)
+		ww := httptest.NewRecorder()
+		defer func() {
+			err := m.applyResponseMigrations(ww, w)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			}
+		}()
 
-		next.ServeHTTP(wresp, req)
+		next.ServeHTTP(ww, req)
 	})
 }
 
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
-	vh := req.Header.Get(rm.opts.VersionHeader)
+	var vh string
+	vh = req.Header.Get(rm.opts.VersionHeader)
 
-	if IsStringEmpty(vh) {
-		vh = rm.opts.DefaultVersion
+	if isStringEmpty(vh) {
+		if rm.opts.GetUserHeaderFunc != nil {
+			var err error
+			vh, err = rm.opts.GetUserHeaderFunc(req)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if isStringEmpty(vh) {
+		vh = rm.iv
 	}
 
 	return &Version{
@@ -145,7 +221,7 @@ type Migrator struct {
 
 func NewMigrator(from, to *Version, avs []*Version, migrations Migrations) (*Migrator, error) {
 	if !from.IsValid() || !to.IsValid() {
-		return nil, ErrorInvalidVersion
+		return nil, ErrInvalidVersion
 	}
 
 	var versions []*Version
@@ -164,7 +240,7 @@ func NewMigrator(from, to *Version, avs []*Version, migrations Migrations) (*Mig
 	}, nil
 }
 
-func (m *Migrator) applyMigrations(req *http.Request) error {
+func (m *Migrator) applyRequestMigrations(req *http.Request) error {
 	if m.versions == nil {
 		return nil
 	}
@@ -172,11 +248,11 @@ func (m *Migrator) applyMigrations(req *http.Request) error {
 	for _, version := range m.versions {
 		migrations, ok := m.migrations[version.String()]
 		if !ok {
-			return ErrorInvalidVersion
+			return ErrInvalidVersion
 		}
 
 		for _, migration := range migrations {
-			if !migration.ShouldMigrateRequest() {
+			if !migration.ShouldMigrateRequest(req) {
 				continue
 			}
 
@@ -190,30 +266,24 @@ func (m *Migrator) applyMigrations(req *http.Request) error {
 	return nil
 }
 
-func (m *Migrator) reverseMigrations(rr *httptest.ResponseRecorder, w http.ResponseWriter) {
-	// TODO(subomi): Clone this object.
+func (m *Migrator) applyResponseMigrations(rr *httptest.ResponseRecorder, w http.ResponseWriter) error {
 	res := rr.Result()
-	ores := res
 
 	for i := len(m.versions); i > 0; i-- {
 		v := m.versions[i-1].String()
 		migrations, ok := m.migrations[v]
 		if !ok {
-			// skip migrations entirely
-			m.finalResponder(w, ores)
-			return
+			return ErrServerError
 		}
 
 		for _, migration := range migrations {
-			if !migration.ShouldMigrateResponse() {
+			if !migration.ShouldMigrateResponse(res) {
 				continue
 			}
 
 			err := migration.MigrateResponse(res)
 			if err != nil {
-				// skip migrations entirely
-				m.finalResponder(w, ores)
-				return
+				return ErrServerError
 			}
 		}
 	}
@@ -221,7 +291,10 @@ func (m *Migrator) reverseMigrations(rr *httptest.ResponseRecorder, w http.Respo
 	err := m.finalResponder(w, res)
 	if err != nil {
 		// log error.
+		return ErrServerError
 	}
+
+	return nil
 }
 
 func (m *Migrator) finalResponder(w http.ResponseWriter, res *http.Response) error {
@@ -230,100 +303,14 @@ func (m *Migrator) finalResponder(w http.ResponseWriter, res *http.Response) err
 		return err
 	}
 
+	for k, v := range res.Header {
+		w.Header()[k] = v
+	}
+
 	_, err = w.Write(body)
 	if err != nil {
 		return err
 	}
 
 	return nil
-}
-
-type Version struct {
-	Format VersionFormat
-	Value  interface{}
-}
-
-func (v *Version) IsValid() bool {
-	switch v.Format {
-	case SemverFormat:
-		_, err := semver.NewVersion(v.Value.(string))
-		if err != nil {
-			return false
-		}
-
-	case DateFormat:
-		_, err := time.Parse(time.DateOnly, v.Value.(string))
-		if err != nil {
-			return false
-		}
-	}
-
-	return true
-}
-
-func (v *Version) Equal(vv *Version) bool {
-	switch v.Format {
-	case SemverFormat:
-		sv, err := semver.NewVersion(v.Value.(string))
-		if err != nil {
-			return false
-		}
-
-		svv, err := semver.NewVersion(vv.Value.(string))
-		if err != nil {
-			return false
-		}
-
-		return sv.Equal(svv)
-
-	case DateFormat:
-		tv, err := time.Parse(time.DateOnly, v.Value.(string))
-		if err != nil {
-			return false
-		}
-
-		tvv, err := time.Parse(time.DateOnly, vv.Value.(string))
-		if err != nil {
-			return false
-		}
-
-		return tv.Equal(tvv)
-	}
-
-	return false
-}
-func (v *Version) String() string {
-	return v.Value.(string)
-}
-
-func DateVersionSorter(versions []*Version) func(i, j int) bool {
-	return func(i, j int) bool {
-		it, err := time.Parse(time.DateOnly, versions[i].Value.(string))
-		if err != nil {
-			return false
-		}
-
-		jt, err := time.Parse(time.DateOnly, versions[j].Value.(string))
-		if err != nil {
-			return false
-		}
-
-		return it.Before(jt)
-	}
-}
-
-func SemVerSorter(versions []*Version) func(i, j int) bool {
-	return func(i, j int) bool {
-		is, err := semver.NewVersion(versions[i].Value.(string))
-		if err != nil {
-			return false
-		}
-
-		js, err := semver.NewVersion(versions[j].Value.(string))
-		if err != nil {
-			return false
-		}
-
-		return is.LessThan(js)
-	}
 }
