@@ -37,7 +37,7 @@ type Migration interface {
 	ShouldMigrateRequest(req *http.Request) bool
 	MigrateRequest(req *http.Request) error
 
-	ShouldMigrateResponse(res *http.Response) bool
+	ShouldMigrateResponse(req *http.Request, res *http.Response) bool
 	MigrateResponse(res *http.Response) error
 }
 
@@ -171,7 +171,7 @@ func (rm *RequestMigration) VersionAPI(next http.Handler) http.Handler {
 		// set up reverse migrations
 		ww := httptest.NewRecorder()
 		defer func() {
-			err := m.applyResponseMigrations(ww, w)
+			err := m.applyResponseMigrations(req, ww, w)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 			}
@@ -266,7 +266,9 @@ func (m *Migrator) applyRequestMigrations(req *http.Request) error {
 	return nil
 }
 
-func (m *Migrator) applyResponseMigrations(rr *httptest.ResponseRecorder, w http.ResponseWriter) error {
+func (m *Migrator) applyResponseMigrations(
+	req *http.Request,
+	rr *httptest.ResponseRecorder, w http.ResponseWriter) error {
 	res := rr.Result()
 
 	for i := len(m.versions); i > 0; i-- {
@@ -277,7 +279,7 @@ func (m *Migrator) applyResponseMigrations(rr *httptest.ResponseRecorder, w http
 		}
 
 		for _, migration := range migrations {
-			if !migration.ShouldMigrateResponse(res) {
+			if !migration.ShouldMigrateResponse(req, res) {
 				continue
 			}
 

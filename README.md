@@ -35,8 +35,5 @@ See the [example directory](https://github.com/subomi/requestmigrations/tree/mai
 This package depends on `httptest.ResponseRecorder`. There are valid concerns as to why this shouldn't be used in the production code, see [here](https://stackoverflow.com/a/52810532). Implementing `ResponseRecorder` that can be used in production requires more knowledge of the http library than I currently know, the plan is to do in this in the nearest future. Be advised. 
 
 
-## Roadmap
-- [ ] Automatically add migration 0.
-
 ## License
 MIT License
