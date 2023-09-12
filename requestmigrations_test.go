@@ -27,7 +27,7 @@ func listUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body, _ := json.Marshal(user)
-	w.Write([]byte(body))
+	_, _ = w.Write([]byte(body))
 }
 
 func Test_VersionAPI(t *testing.T) {
