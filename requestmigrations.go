@@ -42,14 +42,12 @@ type Migration interface {
 }
 
 type GetUserHeaderFunc func(req *http.Request) (string, error)
-type ShouldVersionActor func(req *http.Request) (bool, error)
 
 type RequestMigrationOptions struct {
-	VersionHeader      string
-	CurrentVersion     string
-	GetUserHeaderFunc  GetUserHeaderFunc
-	ShouldVersionActor ShouldVersionActor
-	VersionFormat      VersionFormat
+	VersionHeader     string
+	CurrentVersion    string
+	GetUserHeaderFunc GetUserHeaderFunc
+	VersionFormat     VersionFormat
 }
 
 type RequestMigration struct {
@@ -62,7 +60,11 @@ type RequestMigration struct {
 	migrations Migrations
 }
 
-func NewRequestMigration(opts *RequestMigrationOptions) *RequestMigration {
+func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, error) {
+	if opts == nil {
+		return nil, errors.New("options cannot be nil")
+	}
+
 	me := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "requestmigrations_seconds",
 		Help: "The latency of request migrations from one version to another.",
@@ -88,7 +90,7 @@ func NewRequestMigration(opts *RequestMigrationOptions) *RequestMigration {
 		iv:         iv,
 		versions:   versions,
 		migrations: migrations,
-	}
+	}, nil
 }
 
 func (rm *RequestMigration) RegisterMigrations(migrations Migrations) error {
@@ -114,19 +116,6 @@ func (rm *RequestMigration) RegisterMigrations(migrations Migrations) error {
 
 func (rm *RequestMigration) VersionAPI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if rm.opts.ShouldVersionActor != nil {
-			ok, err := rm.opts.ShouldVersionActor(req)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
-			if !ok {
-				next.ServeHTTP(w, req)
-				return
-			}
-		}
-
 		from, err := rm.getUserVersion(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
