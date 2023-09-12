@@ -3,11 +3,14 @@ package requestmigrations
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 type user struct {
@@ -28,33 +31,75 @@ func listUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func Test_VersionAPI(t *testing.T) {
-	listUserHandler := http.HandlerFunc(listUser)
 	rm := newRequestMigration(t)
 	registerBasicMigrations(t, rm)
 
-	req := httptest.NewRequest(http.MethodGet, "/users", strings.NewReader(""))
-	rr := httptest.NewRecorder()
+	tests := map[string]struct {
+		assert        require.ErrorAssertionFunc
+		addHeader     func(req *http.Request)
+		parseResponse func(t *testing.T, data []byte) error
+	}{
+		"no_transformation": {
+			assert: require.NoError,
+			addHeader: func(req *http.Request) {
+				req.Header.Add("X-Test-Version", "2023-03-01")
+			},
+			parseResponse: func(t *testing.T, data []byte) error {
+				var newUser user
+				err := json.Unmarshal(data, &newUser)
+				if err != nil {
+					return err
+				}
 
-	rm.VersionAPI(listUserHandler).
-		ServeHTTP(rr, req)
+				if isStringEmpty(newUser.FirstName) || isStringEmpty(newUser.LastName) {
+					return errors.New("Firstname or Lastname is not present")
+				}
 
-	// Inspect response to determine it worked.
-	user := parseResponse(t, rr)
+				return nil
+			},
+		},
+		"should_transform_response_payload": {
+			assert: require.NoError,
+			parseResponse: func(t *testing.T, data []byte) error {
+				var user oldUser
+				err := json.Unmarshal(data, &user)
+				if err != nil {
+					return err
+				}
 
-	if isStringEmpty(user.FullName) {
-		t.Error("Error failed")
+				if isStringEmpty(user.FullName) {
+					return errors.New("Fullname is not present")
+				}
+
+				return nil
+			},
+		},
 	}
-}
 
-func parseResponse(t *testing.T, rr *httptest.ResponseRecorder) *oldUser {
-	data, err := io.ReadAll(bytes.NewReader(rr.Body.Bytes()))
-	if err != nil {
-		t.Error(err)
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/users", strings.NewReader(""))
+			if tc.addHeader != nil {
+				tc.addHeader(req)
+			}
+
+			rr := httptest.NewRecorder()
+
+			listUserHandler := http.HandlerFunc(listUser)
+			rm.VersionAPI(listUserHandler).
+				ServeHTTP(rr, req)
+
+			// Inspect response to determine it worked.
+			data, err := io.ReadAll(bytes.NewReader(rr.Body.Bytes()))
+			if err != nil {
+				t.Error(err)
+			}
+
+			// Assert.
+			tc.assert(t, tc.parseResponse(t, data))
+		})
 	}
 
-	var userPayload oldUser
-	_ = json.Unmarshal(data, &userPayload)
-	return &userPayload
 }
 
 func newRequestMigration(t *testing.T) *RequestMigration {
