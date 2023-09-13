@@ -35,7 +35,6 @@ func main() {
     rms := rm.NewRequestMigration(opts)
 
     r := mux.NewRouter()
-
     r.HandleFunc("/users", rms.VersionAPI(ListUsers)).Methods("GET")
 }
 ```
@@ -43,7 +42,7 @@ func main() {
 You can see a full example in the [example directory](https://github.com/subomi/requestmigrations/tree/main/example) for a detailed example.
 
 ## Limitations
-This package depends on `httptest.ResponseRecorder`. There are valid concerns as to why this shouldn't be used in the production code, see [here](https://stackoverflow.com/a/52810532). Implementing `ResponseRecorder` that can be used in production requires more knowledge of the http library than I currently know, the plan is to do in this in the nearest future. Be advised. 
+Please be advised that this package relies on httptest.ResponseRecorder, which, initially, was designed for your test environment rather than regular production code. I used the `ResponseRecorder` because wrapping `http.ResponseWriter` is weirdly not easy (you can read more [here](https://github.com/felixge/httpsnoop#why-this-package-exists)), and I was able to prototype the functionality of this package with the response recorder very quickly. However, from Go 1.20+, the go team introduced `http.ResponseController` (see [#54136](https://github.com/golang/go/issues/54136)), making wrapping the response writer type easy. In subsequent releases, I will be wrapping the writer and removing the use of the response recorder type.
 
 ## License
 MIT License
