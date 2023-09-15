@@ -16,9 +16,6 @@ import (
 )
 
 func main() {
-	// Set the seed value for the random number generator
-	rand.Seed(time.Now().UnixNano())
-
 	rm, err := rms.NewRequestMigration(
 		&rms.RequestMigrationOptions{
 			VersionHeader:  "X-Example-Version",
@@ -63,7 +60,7 @@ func buildMux(api *API) http.Handler {
 	m.HandleFunc("/users/{id}", api.GetUser).Methods("GET")
 
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(api.rm.Metric)
+	api.rm.RegisterMetrics(reg)
 
 	promHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
 	m.Handle("/metrics", promHandler)
