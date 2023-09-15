@@ -2,6 +2,7 @@ package requestmigrations
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,14 +26,16 @@ var (
 	ErrInvalidVersionFormat = errors.New("Invalid version format")
 )
 
-//	migrations := Migrations{
-//		"2023-02-28": []Migration{
-//			Migration{},
-//			Migration{},
-//		},
-//	}
+// migrations := Migrations{
+//   "2023-02-28": []Migration{
+//     Migration{},
+//	   Migration{},
+//	 },
+// }
 type Migrations map[string][]Migration
 
+// Migration is the core interface each transformation in every version
+// needs to implement.
 type Migration interface {
 	ShouldMigrateRequest(req *http.Request) bool
 	MigrateRequest(req *http.Request) error
@@ -129,6 +132,7 @@ func (rm *RequestMigration) VersionAPI(next http.Handler) http.Handler {
 			return
 		}
 
+		fmt.Printf("from: %v, to: %v\n", from, to)
 		if from.Equal(to) {
 			next.ServeHTTP(w, req)
 			return
@@ -240,6 +244,11 @@ func (m *Migrator) applyRequestMigrations(req *http.Request) error {
 			return ErrInvalidVersion
 		}
 
+		// skip initial version.
+		if m.from.Equal(version) {
+			continue
+		}
+
 		for _, migration := range migrations {
 			if !migration.ShouldMigrateRequest(req) {
 				continue
@@ -261,10 +270,15 @@ func (m *Migrator) applyResponseMigrations(
 	res := rr.Result()
 
 	for i := len(m.versions); i > 0; i-- {
-		v := m.versions[i-1].String()
-		migrations, ok := m.migrations[v]
+		version := m.versions[i-1]
+		migrations, ok := m.migrations[version.String()]
 		if !ok {
 			return ErrServerError
+		}
+
+		// skip initial version.
+		if m.from.Equal(version) {
+			continue
 		}
 
 		for _, migration := range migrations {

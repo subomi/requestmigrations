@@ -16,6 +16,11 @@ func init() {
 				Email:     "me@subomioluwalana.com",
 				FirstName: "Subomi",
 				LastName:  "Oluwalana",
+				Profile: &profile{
+					UID:        "999",
+					GithubURL:  "https://github.com/subomi",
+					TwitterURL: "https://twitter.com/subomiOluwalana",
+				},
 				CreatedAt: time.Date(2023, time.March, 10, 7, 0, 0, 0, time.UTC),
 				UpdatedAt: time.Date(2023, time.March, 10, 7, 0, 0, 0, time.UTC),
 			},
@@ -24,6 +29,11 @@ func init() {
 				Email:     "me@raymondtukpe.com",
 				FirstName: "Raymond",
 				LastName:  "Tukpe",
+				Profile: &profile{
+					UID:        "888",
+					GithubURL:  "https://github.com/jirevwe",
+					TwitterURL: "https://twitter.com/rtukpe",
+				},
 				CreatedAt: time.Date(2023, time.March, 10, 7, 0, 0, 0, time.UTC),
 				UpdatedAt: time.Date(2023, time.March, 10, 7, 0, 0, 0, time.UTC),
 			},
@@ -32,6 +42,11 @@ func init() {
 				Email:     "me@danieloluojomu.com",
 				FirstName: "Daniel",
 				LastName:  "Oluojomu",
+				Profile: &profile{
+					UID:        "777",
+					GithubURL:  "https://github.com/danvixent",
+					TwitterURL: "https://twitter.com/danvixent",
+				},
 				CreatedAt: time.Date(2023, time.March, 10, 7, 0, 0, 0, time.UTC),
 				UpdatedAt: time.Date(2023, time.March, 10, 7, 0, 0, 0, time.UTC),
 			},
@@ -45,8 +60,15 @@ type User struct {
 	Email     string    `json:"email"`
 	FirstName string    `json:"first_name"`
 	LastName  string    `json:"last_name"`
+	Profile   *profile  `json:"profile"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type profile struct {
+	UID        string `json:"uid"`
+	GithubURL  string `json:"github_url"`
+	TwitterURL string `json:"twitter_url"`
 }
 
 type Store struct {

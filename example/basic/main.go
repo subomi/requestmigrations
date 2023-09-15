@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
@@ -14,16 +16,26 @@ import (
 )
 
 func main() {
-	rm := rms.NewRequestMigration(
+	// Set the seed value for the random number generator
+	rand.Seed(time.Now().UnixNano())
+
+	rm, err := rms.NewRequestMigration(
 		&rms.RequestMigrationOptions{
 			VersionHeader:  "X-Example-Version",
-			CurrentVersion: "2023-09-02",
+			CurrentVersion: "2023-05-01",
 			VersionFormat:  rms.DateFormat,
 		})
 
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	rm.RegisterMigrations(rms.Migrations{
-		"2023-09-02": []rms.Migration{
-			&CombineNamesForUserMigration{},
+		"2023-05-01": []rms.Migration{
+			&expandProfileForUserMigration{},
+		},
+		"2023-04-01": []rms.Migration{
+			&combineNamesForUserMigration{},
 		},
 	})
 
@@ -33,7 +45,7 @@ func main() {
 		Handler: buildMux(api),
 	}
 
-	err := backend.ListenAndServe()
+	err = backend.ListenAndServe()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -45,9 +57,9 @@ func main() {
 
 func buildMux(api *API) http.Handler {
 	m := mux.NewRouter()
-	m.Use(api.rm.VersionAPI)
 
-	m.HandleFunc("/users", api.ListUser).Methods("GET")
+	m.Handle("/users",
+		api.rm.VersionAPI(http.HandlerFunc(api.ListUser))).Methods("GET")
 	m.HandleFunc("/users/{id}", api.GetUser).Methods("GET")
 
 	reg := prometheus.NewRegistry()
@@ -73,6 +85,10 @@ type API struct {
 }
 
 func (a *API) ListUser(w http.ResponseWriter, r *http.Request) {
+	// Generate a random Int type number between 1 and 10
+	randNum := rand.Intn(3-1+1) + 1
+	time.Sleep(time.Duration(randNum) * time.Second)
+
 	users, err := a.store.GetAll()
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
