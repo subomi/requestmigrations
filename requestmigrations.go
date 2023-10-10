@@ -1,11 +1,13 @@
 package requestmigrations
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"sync"
 	"time"
@@ -37,11 +39,8 @@ type Migrations map[string][]Migration
 // Migration is the core interface each transformation in every version
 // needs to implement.
 type Migration interface {
-	ShouldMigrateRequest(req *http.Request) bool
-	MigrateRequest(req *http.Request) error
-
-	ShouldMigrateResponse(req *http.Request, res *http.Response) bool
-	MigrateResponse(res *http.Response) error
+	Migrate(data []byte, header http.Header) ([]byte, http.Header, error)
+	ShouldMigrateConstraint(url *url.URL, method string, data []byte, isReq bool) bool
 }
 
 type GetUserHeaderFunc func(req *http.Request) (string, error)
@@ -158,6 +157,7 @@ func (rm *RequestMigration) VersionAPI(next http.Handler) http.Handler {
 		err = m.applyRequestMigrations(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			fmt.Println(err)
 			return
 		}
 
@@ -238,6 +238,13 @@ func (m *Migrator) applyRequestMigrations(req *http.Request) error {
 		return nil
 	}
 
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		return err
+	}
+
+	header := req.Header.Clone()
+
 	for _, version := range m.versions {
 		migrations, ok := m.migrations[version.String()]
 		if !ok {
@@ -250,16 +257,21 @@ func (m *Migrator) applyRequestMigrations(req *http.Request) error {
 		}
 
 		for _, migration := range migrations {
-			if !migration.ShouldMigrateRequest(req) {
+			if !migration.ShouldMigrateConstraint(req.URL, req.Method, data, true) {
 				continue
 			}
 
-			err := migration.MigrateRequest(req)
+			data, header, err = migration.Migrate(data, header)
 			if err != nil {
 				return err
 			}
 		}
 	}
+
+	req.Header = header
+
+	// set the body back for the rest of the middleware.
+	req.Body = io.NopCloser(bytes.NewReader(data))
 
 	return nil
 }
@@ -268,6 +280,13 @@ func (m *Migrator) applyResponseMigrations(
 	req *http.Request,
 	rr *httptest.ResponseRecorder, w http.ResponseWriter) error {
 	res := rr.Result()
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+
+	header := res.Header.Clone()
 
 	for i := len(m.versions); i > 0; i-- {
 		version := m.versions[i-1]
@@ -282,18 +301,18 @@ func (m *Migrator) applyResponseMigrations(
 		}
 
 		for _, migration := range migrations {
-			if !migration.ShouldMigrateResponse(req, res) {
+			if !migration.ShouldMigrateConstraint(req.URL, req.Method, data, false) {
 				continue
 			}
 
-			err := migration.MigrateResponse(res)
+			data, header, err = migration.Migrate(data, header)
 			if err != nil {
 				return ErrServerError
 			}
 		}
 	}
 
-	err := m.finalResponder(w, res)
+	err = m.finalResponder(w, data, header)
 	if err != nil {
 		// log error.
 		return ErrServerError
@@ -302,17 +321,12 @@ func (m *Migrator) applyResponseMigrations(
 	return nil
 }
 
-func (m *Migrator) finalResponder(w http.ResponseWriter, res *http.Response) error {
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return err
-	}
-
-	for k, v := range res.Header {
+func (m *Migrator) finalResponder(w http.ResponseWriter, body []byte, h http.Header) error {
+	for k, v := range h {
 		w.Header()[k] = v
 	}
 
-	_, err = w.Write(body)
+	_, err := w.Write(body)
 	if err != nil {
 		return err
 	}

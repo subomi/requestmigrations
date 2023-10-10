@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -13,27 +11,22 @@ import (
 // Migrations
 type combineNamesForUserMigration struct{}
 
-func (c *combineNamesForUserMigration) ShouldMigrateRequest(r *http.Request) bool {
-	return false
+func (c *combineNamesForUserMigration) ShouldMigrateConstraint(
+	url *url.URL,
+	method string,
+	data []byte,
+	isReq bool) bool {
+
+	isUserPath := url.Path == "/users"
+	isGetMethod := method == http.MethodGet
+	isValidType := isReq == false
+
+	return isUserPath && isGetMethod && isValidType
 }
 
-func (c *combineNamesForUserMigration) MigrateRequest(r *http.Request) error {
-	fmt.Println("migrating request...")
-
-	return nil
-}
-
-func (c *combineNamesForUserMigration) ShouldMigrateResponse(
-	req *http.Request,
-	res *http.Response) bool {
-
-	isUserPath := req.URL.Path == "/users"
-	isGetMethod := req.Method == http.MethodGet
-
-	return isUserPath && isGetMethod
-}
-
-func (c *combineNamesForUserMigration) MigrateResponse(r *http.Response) error {
+func (c *combineNamesForUserMigration) Migrate(
+	body []byte,
+	h http.Header) ([]byte, http.Header, error) {
 	type oldUser struct {
 		UID       string    `json:"uid"`
 		Email     string    `json:"email"`
@@ -43,21 +36,16 @@ func (c *combineNamesForUserMigration) MigrateResponse(r *http.Response) error {
 		UpdatedAt time.Time `json:"updated_at"`
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return err
-	}
-
 	var res ServerResponse
-	err = json.Unmarshal(body, &res)
+	err := json.Unmarshal(body, &res)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	var users []*oldUser20230501
 	err = json.Unmarshal(res.Data, &users)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	var newUsers []*oldUser
@@ -74,11 +62,10 @@ func (c *combineNamesForUserMigration) MigrateResponse(r *http.Response) error {
 
 	body, err = generateSuccessResponse(&newUsers, "users retrieved successfully")
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return nil
+	return body, h, nil
 }
 
 type oldUser20230501 struct {
@@ -93,40 +80,32 @@ type oldUser20230501 struct {
 
 type expandProfileForUserMigration struct{}
 
-func (e *expandProfileForUserMigration) ShouldMigrateRequest(r *http.Request) bool {
-	return false
+func (e *expandProfileForUserMigration) ShouldMigrateConstraint(
+	url *url.URL,
+	method string,
+	body []byte,
+	isReq bool) bool {
+
+	isUserPath := url.Path == "/users"
+	isGetMethod := method == http.MethodGet
+	isValidType := isReq == false
+
+	return isUserPath && isGetMethod && isValidType
 }
 
-func (e *expandProfileForUserMigration) MigrateRequest(r *http.Request) error {
-	return nil
-}
-
-func (e *expandProfileForUserMigration) ShouldMigrateResponse(
-	req *http.Request,
-	res *http.Response) bool {
-
-	isUserPath := req.URL.Path == "/users"
-	isGetMethod := req.Method == http.MethodGet
-
-	return isUserPath && isGetMethod
-}
-
-func (e *expandProfileForUserMigration) MigrateResponse(r *http.Response) error {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return err
-	}
-
+func (e *expandProfileForUserMigration) Migrate(
+	body []byte,
+	h http.Header) ([]byte, http.Header, error) {
 	var res ServerResponse
-	err = json.Unmarshal(body, &res)
+	err := json.Unmarshal(body, &res)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	var users []*User
 	err = json.Unmarshal(res.Data, &users)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	var newUsers []*oldUser20230501
@@ -144,9 +123,8 @@ func (e *expandProfileForUserMigration) MigrateResponse(r *http.Response) error 
 
 	body, err = generateSuccessResponse(&newUsers, "users retrieved successfully")
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return nil
+	return body, h, nil
 }
