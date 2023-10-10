@@ -3,7 +3,6 @@ package requestmigrations
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,9 +22,10 @@ const (
 )
 
 var (
-	ErrServerError          = errors.New("Server error")
-	ErrInvalidVersion       = errors.New("Invalid version number")
-	ErrInvalidVersionFormat = errors.New("Invalid version format")
+	ErrServerError                 = errors.New("Server error")
+	ErrInvalidVersion              = errors.New("Invalid version number")
+	ErrInvalidVersionFormat        = errors.New("Invalid version format")
+	ErrCurrentVersionCannotBeEmpty = errors.New("Current Version field cannot be empty")
 )
 
 // migrations := Migrations{
@@ -37,25 +37,41 @@ var (
 type Migrations map[string][]Migration
 
 // Migration is the core interface each transformation in every version
-// needs to implement.
+// needs to implement. It includes two predicate functions and two
+// transformation functions.
 type Migration interface {
 	Migrate(data []byte, header http.Header) ([]byte, http.Header, error)
 	ShouldMigrateConstraint(url *url.URL, method string, data []byte, isReq bool) bool
 }
 
-type GetUserHeaderFunc func(req *http.Request) (string, error)
+type GetUserVersionFunc func(req *http.Request) (string, error)
 
+// RequestMigrationOptions is used to configure the RequestMigration type.
 type RequestMigrationOptions struct {
-	VersionHeader     string
-	CurrentVersion    string
-	GetUserHeaderFunc GetUserHeaderFunc
-	VersionFormat     VersionFormat
+	// VersionHeader refers to the header value used to retrieve the request's
+	// version. If VersionHeader is empty, we call the GetUserVersionFunc to
+	// retrive the user's version.
+	VersionHeader string
+
+	// CurrentVersion refers to the API's most recent version. This value should
+	// map to the most recent version in the Migrations slice.
+	CurrentVersion string
+
+	// GetUserHeaderFunc is a function to retrieve the user's version. This is useful
+	// where the user has a persistent version that necessarily being available in the
+	// request.
+	GetUserVersionFunc GetUserVersionFunc
+
+	// VersionFormat is used to specify the versioning format. The two supported types
+	// are DateFormat and SemverFormat.
+	VersionFormat VersionFormat
 }
 
+// RequestMigration is the exported type responsible for handling request migrations.
 type RequestMigration struct {
 	opts     *RequestMigrationOptions
 	versions []*Version
-	Metric   *prometheus.HistogramVec
+	metric   *prometheus.HistogramVec
 	iv       string
 
 	mu         sync.Mutex
@@ -65,6 +81,10 @@ type RequestMigration struct {
 func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, error) {
 	if opts == nil {
 		return nil, errors.New("options cannot be nil")
+	}
+
+	if isStringEmpty(opts.CurrentVersion) {
+		return nil, ErrCurrentVersionCannotBeEmpty
 	}
 
 	me := prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -88,7 +108,7 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 
 	return &RequestMigration{
 		opts:       opts,
-		Metric:     me,
+		metric:     me,
 		iv:         iv,
 		versions:   versions,
 		migrations: migrations,
@@ -116,6 +136,9 @@ func (rm *RequestMigration) RegisterMigrations(migrations Migrations) error {
 	return nil
 }
 
+// VersionAPI is the core exported method responsible for applying request and
+// response transformations. It can be applied as a middleware or to specific
+// handlers alone.
 func (rm *RequestMigration) VersionAPI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		from, err := rm.getUserVersion(req)
@@ -125,39 +148,23 @@ func (rm *RequestMigration) VersionAPI(next http.Handler) http.Handler {
 		}
 
 		to := rm.getCurrentVersion()
-		m, err := NewMigrator(from, to, rm.versions, rm.migrations)
+		m, err := Newmigrator(from, to, rm.versions, rm.migrations)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		fmt.Printf("from: %v, to: %v\n", from, to)
 		if from.Equal(to) {
 			next.ServeHTTP(w, req)
 			return
 		}
 
 		startTime := time.Now()
-		defer func() {
-			finishTime := time.Now()
-			latency := finishTime.Sub(startTime)
-
-			h, err := rm.Metric.GetMetricWith(
-				prometheus.Labels{
-					"from": from.String(),
-					"to":   to.String()})
-			if err != nil {
-				// do nothing.
-				return
-			}
-
-			h.Observe(latency.Seconds())
-		}()
+		defer rm.observeRequestLatency(from, to, startTime)
 
 		err = m.applyRequestMigrations(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
-			fmt.Println(err)
 			return
 		}
 
@@ -178,23 +185,28 @@ func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) 
 	var vh string
 	vh = req.Header.Get(rm.opts.VersionHeader)
 
-	if isStringEmpty(vh) {
-		if rm.opts.GetUserHeaderFunc != nil {
-			var err error
-			vh, err = rm.opts.GetUserHeaderFunc(req)
-			if err != nil {
-				return nil, err
-			}
-		}
+	if !isStringEmpty(vh) {
+		return &Version{
+			Format: rm.opts.VersionFormat,
+			Value:  vh,
+		}, nil
 	}
 
-	if isStringEmpty(vh) {
-		vh = rm.iv
+	if rm.opts.GetUserVersionFunc != nil {
+		vh, err := rm.opts.GetUserVersionFunc(req)
+		if err != nil {
+			return nil, err
+		}
+
+		return &Version{
+			Format: rm.opts.VersionFormat,
+			Value:  vh,
+		}, nil
 	}
 
 	return &Version{
 		Format: rm.opts.VersionFormat,
-		Value:  vh,
+		Value:  rm.iv,
 	}, nil
 }
 
@@ -205,14 +217,34 @@ func (rm *RequestMigration) getCurrentVersion() *Version {
 	}
 }
 
-type Migrator struct {
+func (rm *RequestMigration) observeRequestLatency(from, to *Version, sT time.Time) {
+	finishTime := time.Now()
+	latency := finishTime.Sub(sT)
+
+	h, err := rm.metric.GetMetricWith(
+		prometheus.Labels{
+			"from": from.String(),
+			"to":   to.String()})
+	if err != nil {
+		// do nothing.
+		return
+	}
+
+	h.Observe(latency.Seconds())
+}
+
+func (rm *RequestMigration) RegisterMetrics(reg *prometheus.Registry) {
+	reg.MustRegister(rm.metric)
+}
+
+type migrator struct {
 	to         *Version
 	from       *Version
 	versions   []*Version
 	migrations Migrations
 }
 
-func NewMigrator(from, to *Version, avs []*Version, migrations Migrations) (*Migrator, error) {
+func Newmigrator(from, to *Version, avs []*Version, migrations Migrations) (*migrator, error) {
 	if !from.IsValid() || !to.IsValid() {
 		return nil, ErrInvalidVersion
 	}
@@ -225,7 +257,7 @@ func NewMigrator(from, to *Version, avs []*Version, migrations Migrations) (*Mig
 		}
 	}
 
-	return &Migrator{
+	return &migrator{
 		to:         to,
 		from:       from,
 		versions:   versions,
@@ -233,7 +265,7 @@ func NewMigrator(from, to *Version, avs []*Version, migrations Migrations) (*Mig
 	}, nil
 }
 
-func (m *Migrator) applyRequestMigrations(req *http.Request) error {
+func (m *migrator) applyRequestMigrations(req *http.Request) error {
 	if m.versions == nil {
 		return nil
 	}
@@ -276,7 +308,7 @@ func (m *Migrator) applyRequestMigrations(req *http.Request) error {
 	return nil
 }
 
-func (m *Migrator) applyResponseMigrations(
+func (m *migrator) applyResponseMigrations(
 	req *http.Request,
 	rr *httptest.ResponseRecorder, w http.ResponseWriter) error {
 	res := rr.Result()
@@ -321,7 +353,7 @@ func (m *Migrator) applyResponseMigrations(
 	return nil
 }
 
-func (m *Migrator) finalResponder(w http.ResponseWriter, body []byte, h http.Header) error {
+func (m *migrator) finalResponder(w http.ResponseWriter, body []byte, h http.Header) error {
 	for k, v := range h {
 		w.Header()[k] = v
 	}
