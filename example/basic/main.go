@@ -83,7 +83,7 @@ type API struct {
 
 func (a *API) ListUser(w http.ResponseWriter, r *http.Request) {
 	// Generate a random Int type number between 1 and 10
-	randNum := rand.Intn(3-1+1) + 1
+	randNum := rand.Intn(2-1+1) + 1
 	time.Sleep(time.Duration(randNum) * time.Second)
 
 	users, err := a.store.GetAll()

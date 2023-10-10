@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -136,33 +137,27 @@ type oldUser struct {
 }
 type combineNamesMigration struct{}
 
-func (c *combineNamesMigration) ShouldMigrateRequest(r *http.Request) bool {
-	return false
+func (c *combineNamesMigration) ShouldMigrateConstraint(
+	url *url.URL,
+	method string,
+	body []byte,
+	isReq bool) bool {
+
+	isUserPath := url.Path == "/users"
+	isGetMethod := method == http.MethodGet
+	isValidType := isReq == false
+
+	return isUserPath && isGetMethod && isValidType
 }
 
-func (c *combineNamesMigration) MigrateRequest(r *http.Request) error {
-	return nil
-}
-
-func (c *combineNamesMigration) ShouldMigrateResponse(
-	req *http.Request,
-	res *http.Response) bool {
-	isUserPath := req.URL.Path == "/users"
-	isGetMethod := req.Method == http.MethodGet
-
-	return isUserPath && isGetMethod
-}
-
-func (c *combineNamesMigration) MigrateResponse(r *http.Response) error {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return err
-	}
+func (c *combineNamesMigration) Migrate(
+	body []byte,
+	h http.Header) ([]byte, http.Header, error) {
 
 	var newuser user
-	err = json.Unmarshal(body, &newuser)
+	err := json.Unmarshal(body, &newuser)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	var user oldUser
@@ -171,9 +166,8 @@ func (c *combineNamesMigration) MigrateResponse(r *http.Response) error {
 
 	body, err = json.Marshal(&user)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return nil
+	return body, h, nil
 }
