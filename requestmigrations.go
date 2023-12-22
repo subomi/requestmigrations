@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"sort"
 	"sync"
@@ -136,49 +135,50 @@ func (rm *RequestMigration) RegisterMigrations(migrations Migrations) error {
 	return nil
 }
 
-// VersionAPI is the core exported method responsible for applying request and
-// response transformations. It can be applied as a middleware or to specific
-// handlers alone.
-func (rm *RequestMigration) VersionAPI(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		from, err := rm.getUserVersion(req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+func (rm *RequestMigration) VersionRequest(r *http.Request) error {
+	from, err := rm.getUserVersion(r)
+	if err != nil {
+		return err
+	}
 
-		to := rm.getCurrentVersion()
-		m, err := Newmigrator(from, to, rm.versions, rm.migrations)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+	to := rm.getCurrentVersion()
+	m, err := Newmigrator(from, to, rm.versions, rm.migrations)
+	if err != nil {
+		return err
+	}
 
-		if from.Equal(to) {
-			next.ServeHTTP(w, req)
-			return
-		}
+	if from.Equal(to) {
+		return nil
+	}
 
-		startTime := time.Now()
-		defer rm.observeRequestLatency(from, to, startTime)
+	startTime := time.Now()
+	defer rm.observeRequestLatency(from, to, startTime)
 
-		err = m.applyRequestMigrations(req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+	err = m.applyRequestMigrations(r)
+	if err != nil {
+		return err
+	}
 
-		// set up reverse migrations
-		ww := httptest.NewRecorder()
-		defer func() {
-			err := m.applyResponseMigrations(req, ww, w)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-			}
-		}()
+	return nil
+}
 
-		next.ServeHTTP(ww, req)
-	})
+func (rm *RequestMigration) VersionResponse(r *http.Request, body []byte) ([]byte, error) {
+	from, err := rm.getUserVersion(r)
+	if err != nil {
+		return nil, err
+	}
+
+	to := rm.getCurrentVersion()
+	m, err := Newmigrator(from, to, rm.versions, rm.migrations)
+	if err != nil {
+		return nil, err
+	}
+
+	if from.Equal(to) {
+		return body, nil
+	}
+
+	return m.applyResponseMigrations(r, r.Header, body)
 }
 
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
@@ -308,60 +308,32 @@ func (m *migrator) applyRequestMigrations(req *http.Request) error {
 	return nil
 }
 
-func (m *migrator) applyResponseMigrations(
-	req *http.Request,
-	rr *httptest.ResponseRecorder, w http.ResponseWriter) error {
-	res := rr.Result()
-
-	data, err := io.ReadAll(res.Body)
-	if err != nil {
-		return err
-	}
-
-	header := res.Header.Clone()
+func (m *migrator) applyResponseMigrations(r *http.Request, header http.Header, data []byte) ([]byte, error) {
+	var err error
 
 	for i := len(m.versions); i > 0; i-- {
 		version := m.versions[i-1]
 		migrations, ok := m.migrations[version.String()]
 		if !ok {
-			return ErrServerError
+			return nil, ErrServerError
 		}
 
 		// skip initial version.
 		if m.from.Equal(version) {
-			continue
+			return data, nil
 		}
 
 		for _, migration := range migrations {
-			if !migration.ShouldMigrateConstraint(req.URL, req.Method, data, false) {
+			if !migration.ShouldMigrateConstraint(r.URL, r.Method, data, false) {
 				continue
 			}
 
-			data, header, err = migration.Migrate(data, header)
+			data, _, err = migration.Migrate(data, header)
 			if err != nil {
-				return ErrServerError
+				return nil, ErrServerError
 			}
 		}
 	}
 
-	err = m.finalResponder(w, data, header)
-	if err != nil {
-		// log error.
-		return ErrServerError
-	}
-
-	return nil
-}
-
-func (m *migrator) finalResponder(w http.ResponseWriter, body []byte, h http.Header) error {
-	for k, v := range h {
-		w.Header()[k] = v
-	}
-
-	_, err := w.Write(body)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return data, nil
 }
