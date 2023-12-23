@@ -18,7 +18,7 @@ This package primarily exposes two APIs - `VersionRequest` and `VersionResponse`
 package main 
 
 func createUser(r *http.Request, w http.ResponseWriter) {
-    err := rm.VersionRequest(r)
+	err := rm.VersionRequest(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func createUser(r *http.Request, w http.ResponseWriter) {
 		t.Fatal(err)
 	}
 
-    resBody, err := rm.VersionResponse(r, body)
+	resBody, err := rm.VersionResponse(r, body)
 	if err != nil {
 		t.Fatal(err)
 	}
