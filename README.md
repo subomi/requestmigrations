@@ -8,7 +8,7 @@
 
 ## Installation
 ```bash
- $ go get github.com/subomi/requestmigrations 
+ go get github.com/subomi/requestmigrations 
 ```
 
 ## Usage
