@@ -18,39 +18,39 @@ This package primarily exposes two APIs - `VersionRequest` and `VersionResponse`
 package main 
 
 func createUser(r *http.Request, w http.ResponseWriter) {
-	err := rm.VersionRequest(r)
-	if err != nil {
-		t.Fatal(err)
-	}
+  err := rm.VersionRequest(r, "createUser")
+  if err != nil {
+    t.Fatal(err)
+  }
 
-	payload, err := io.ReadAll(r.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
+  payload, err := io.ReadAll(r.Body)
+  if err != nil {
+    t.Fatal(err)
+  }
 
-	var userObject user
-	err = json.Unmarshal(payload, &userObject)
-	if err != nil {
-		t.Fatal(err)
-	}
+  var userObject user
+  err = json.Unmarshal(payload, &userObject)
+  if err != nil {
+    t.Fatal(err)
+  }
 
-	userObject = user{
-		Email:     userObject.Email,
-		FirstName: userObject.FirstName,
-		LastName:  userObject.LastName,
-	}
+  userObject = user{
+    Email:     userObject.Email,
+    FirstName: userObject.FirstName,
+    LastName:  userObject.LastName,
+  }
 
-	body, err := json.Marshal(userObject)
-	if err != nil {
-		t.Fatal(err)
-	}
+  body, err := json.Marshal(userObject)
+  if err != nil {
+    t.Fatal(err)
+  }
 
-	resBody, err := rm.VersionResponse(r, body)
-	if err != nil {
-		t.Fatal(err)
-	}
+  resBody, err := rm.VersionResponse(r, body, "createUser")
+  if err != nil {
+    t.Fatal(err)
+  }
 
-	_, _ = w.Write(resBody)
+  _, _ = w.Write(resBody)
 }
 
 ```
