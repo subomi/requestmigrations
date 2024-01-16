@@ -5,8 +5,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
+	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,21 +28,23 @@ var (
 	ErrCurrentVersionCannotBeEmpty = errors.New("Current Version field cannot be empty")
 )
 
+// Migration is the core interface each transformation in every version
+// needs to implement. It includes two predicate functions and two
+// transformation functions.
+type Migration interface {
+	Migrate(data []byte, header http.Header) ([]byte, http.Header, error)
+}
+
+// Migrations is an array of migrations declared by each handler.
+type Migrations []Migration
+
 // migrations := Migrations{
 //   "2023-02-28": []Migration{
 //     Migration{},
 //	   Migration{},
 //	 },
 // }
-type Migrations map[string][]Migration
-
-// Migration is the core interface each transformation in every version
-// needs to implement. It includes two predicate functions and two
-// transformation functions.
-type Migration interface {
-	Migrate(data []byte, header http.Header) ([]byte, http.Header, error)
-	ShouldMigrateConstraint(url *url.URL, method string, data []byte, isReq bool) bool
-}
+type MigrationStore map[string]Migrations
 
 type GetUserVersionFunc func(req *http.Request) (string, error)
 
@@ -74,7 +77,7 @@ type RequestMigration struct {
 	iv       string
 
 	mu         sync.Mutex
-	migrations Migrations
+	migrations MigrationStore
 }
 
 func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, error) {
@@ -98,7 +101,7 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 		iv = "v0"
 	}
 
-	migrations := Migrations{
+	migrations := MigrationStore{
 		iv: []Migration{},
 	}
 
@@ -114,7 +117,7 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 	}, nil
 }
 
-func (rm *RequestMigration) RegisterMigrations(migrations Migrations) error {
+func (rm *RequestMigration) RegisterMigrations(migrations MigrationStore) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -135,7 +138,7 @@ func (rm *RequestMigration) RegisterMigrations(migrations Migrations) error {
 	return nil
 }
 
-func (rm *RequestMigration) VersionRequest(r *http.Request) error {
+func (rm *RequestMigration) VersionRequest(r *http.Request, handler string) error {
 	from, err := rm.getUserVersion(r)
 	if err != nil {
 		return err
@@ -154,7 +157,7 @@ func (rm *RequestMigration) VersionRequest(r *http.Request) error {
 	startTime := time.Now()
 	defer rm.observeRequestLatency(from, to, startTime)
 
-	err = m.applyRequestMigrations(r)
+	err = m.applyRequestMigrations(r, handler)
 	if err != nil {
 		return err
 	}
@@ -162,7 +165,7 @@ func (rm *RequestMigration) VersionRequest(r *http.Request) error {
 	return nil
 }
 
-func (rm *RequestMigration) VersionResponse(r *http.Request, body []byte) ([]byte, error) {
+func (rm *RequestMigration) VersionResponse(r *http.Request, body []byte, handler string) ([]byte, error) {
 	from, err := rm.getUserVersion(r)
 	if err != nil {
 		return nil, err
@@ -178,7 +181,7 @@ func (rm *RequestMigration) VersionResponse(r *http.Request, body []byte) ([]byt
 		return body, nil
 	}
 
-	return m.applyResponseMigrations(r, r.Header, body)
+	return m.applyResponseMigrations(r, r.Header, body, handler)
 }
 
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
@@ -241,10 +244,10 @@ type migrator struct {
 	to         *Version
 	from       *Version
 	versions   []*Version
-	migrations Migrations
+	migrations MigrationStore
 }
 
-func Newmigrator(from, to *Version, avs []*Version, migrations Migrations) (*migrator, error) {
+func Newmigrator(from, to *Version, avs []*Version, migrations MigrationStore) (*migrator, error) {
 	if !from.IsValid() || !to.IsValid() {
 		return nil, ErrInvalidVersion
 	}
@@ -265,7 +268,7 @@ func Newmigrator(from, to *Version, avs []*Version, migrations Migrations) (*mig
 	}, nil
 }
 
-func (m *migrator) applyRequestMigrations(req *http.Request) error {
+func (m *migrator) applyRequestMigrations(req *http.Request, handler string) error {
 	if m.versions == nil {
 		return nil
 	}
@@ -288,11 +291,8 @@ func (m *migrator) applyRequestMigrations(req *http.Request) error {
 			continue
 		}
 
-		for _, migration := range migrations {
-			if !migration.ShouldMigrateConstraint(req.URL, req.Method, data, true) {
-				continue
-			}
-
+		migration := m.retrieveHandlerRequestMigration(migrations, handler)
+		if migration != nil {
 			data, header, err = migration.Migrate(data, header)
 			if err != nil {
 				return err
@@ -308,7 +308,7 @@ func (m *migrator) applyRequestMigrations(req *http.Request) error {
 	return nil
 }
 
-func (m *migrator) applyResponseMigrations(r *http.Request, header http.Header, data []byte) ([]byte, error) {
+func (m *migrator) applyResponseMigrations(r *http.Request, header http.Header, data []byte, handler string) ([]byte, error) {
 	var err error
 
 	for i := len(m.versions); i > 0; i-- {
@@ -323,17 +323,42 @@ func (m *migrator) applyResponseMigrations(r *http.Request, header http.Header, 
 			return data, nil
 		}
 
-		for _, migration := range migrations {
-			if !migration.ShouldMigrateConstraint(r.URL, r.Method, data, false) {
-				continue
-			}
-
+		migration := m.retrieveHandlerResponseMigration(migrations, handler)
+		if migration != nil {
 			data, _, err = migration.Migrate(data, header)
 			if err != nil {
 				return nil, ErrServerError
 			}
 		}
+
 	}
 
 	return data, nil
+}
+
+func (m *migrator) retrieveHandlerResponseMigration(migrations Migrations, handler string) Migration {
+	return m.retrieveHandlerMigration(migrations, strings.Join([]string{handler, "response"}, ""))
+}
+
+func (m *migrator) retrieveHandlerRequestMigration(migrations Migrations, handler string) Migration {
+	return m.retrieveHandlerMigration(migrations, strings.Join([]string{handler, "request"}, ""))
+}
+
+func (m *migrator) retrieveHandlerMigration(migrations Migrations, handler string) Migration {
+	for _, migration := range migrations {
+		var mv reflect.Value
+
+		mv = reflect.ValueOf(migration)
+
+		if mv.Kind() == reflect.Ptr {
+			mv = mv.Elem()
+		}
+
+		fName := strings.ToLower(mv.Type().Name())
+		if strings.HasPrefix(fName, strings.ToLower(handler)) {
+			return migration
+		}
+	}
+
+	return nil
 }

@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -36,10 +35,11 @@ func newRequestMigration(t *testing.T) *RequestMigration {
 }
 
 func registerBasicMigrations(t *testing.T, rm *RequestMigration) {
-	migrations := &Migrations{
-		"2023-03-01": []Migration{
-			&combineNamesMigration{},
-			&splitNameMigration{},
+	migrations := &MigrationStore{
+		"2023-03-01": Migrations{
+			&getUserResponseCombineNamesMigration{},
+			&createUserRequestSplitNameMigration{},
+			&createUserResponseCombineNamesMigration{},
 		},
 	}
 
@@ -53,21 +53,10 @@ type oldUser struct {
 	Email    string `json:"email"`
 	FullName string `json:"full_name"`
 }
-type combineNamesMigration struct{}
 
-func (c *combineNamesMigration) ShouldMigrateConstraint(
-	url *url.URL,
-	method string,
-	body []byte,
-	isReq bool) bool {
+type getUserResponseCombineNamesMigration struct{}
 
-	isUserPath := url.Path == "/users"
-	isValidType := isReq == false
-
-	return isUserPath && isValidType
-}
-
-func (c *combineNamesMigration) Migrate(
+func (c *getUserResponseCombineNamesMigration) Migrate(
 	body []byte,
 	h http.Header) ([]byte, http.Header, error) {
 
@@ -89,22 +78,9 @@ func (c *combineNamesMigration) Migrate(
 	return body, h, nil
 }
 
-type splitNameMigration struct{}
+type createUserRequestSplitNameMigration struct{}
 
-func (c *splitNameMigration) ShouldMigrateConstraint(
-	url *url.URL,
-	method string,
-	body []byte,
-	isReq bool) bool {
-
-	isUserPath := url.Path == "/users"
-	isPostMethod := method == http.MethodPost
-	isValidType := isReq == true
-
-	return isUserPath && isPostMethod && isValidType
-}
-
-func (c *splitNameMigration) Migrate(
+func (c *createUserRequestSplitNameMigration) Migrate(
 	body []byte,
 	h http.Header) ([]byte, http.Header, error) {
 
@@ -129,9 +105,33 @@ func (c *splitNameMigration) Migrate(
 	return body, h, nil
 }
 
+type createUserResponseCombineNamesMigration struct{}
+
+func (c *createUserResponseCombineNamesMigration) Migrate(
+	body []byte,
+	h http.Header) ([]byte, http.Header, error) {
+
+	var newuser user
+	err := json.Unmarshal(body, &newuser)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var user oldUser
+	user.Email = newuser.Email
+	user.FullName = strings.Join([]string{newuser.FirstName, newuser.LastName}, " ")
+
+	body, err = json.Marshal(&user)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return body, h, nil
+}
+
 func createUser(t *testing.T, rm *RequestMigration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := rm.VersionRequest(r)
+		err := rm.VersionRequest(r, "createUser")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,7 +158,7 @@ func createUser(t *testing.T, rm *RequestMigration) http.Handler {
 			t.Fatal(err)
 		}
 
-		resBody, err := rm.VersionResponse(r, body)
+		resBody, err := rm.VersionResponse(r, body, "createUser")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -255,7 +255,7 @@ func Test_VersionRequest(t *testing.T) {
 
 func getUser(t *testing.T, rm *RequestMigration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := rm.VersionRequest(r)
+		err := rm.VersionRequest(r, "getUser")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -271,7 +271,7 @@ func getUser(t *testing.T, rm *RequestMigration) http.Handler {
 			t.Fatal(err)
 		}
 
-		resBody, err := rm.VersionResponse(r, body)
+		resBody, err := rm.VersionResponse(r, body, "getUser")
 		if err != nil {
 			t.Fatal(err)
 		}
