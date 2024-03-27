@@ -69,6 +69,8 @@ type RequestMigrationOptions struct {
 	VersionFormat VersionFormat
 }
 
+type rollbackFn func(w http.ResponseWriter)
+
 // RequestMigration is the exported type responsible for handling request migrations.
 type RequestMigration struct {
 	opts     *RequestMigrationOptions
@@ -138,7 +140,36 @@ func (rm *RequestMigration) RegisterMigrations(migrations MigrationStore) error 
 	return nil
 }
 
-func (rm *RequestMigration) VersionRequest(r *http.Request, handler string) error {
+// Migrate is the core API for apply transformations to your handlers. It should be
+// called at the start of your handler to transform the body attached to your request
+// before further processing. To transform the response as well, you need to use
+// the rollback and res function to roll changes back and set the handler response
+// respectively.
+func (rm *RequestMigration) Migrate(r *http.Request, handler string) (error, *response, rollbackFn) {
+	err := rm.migrateRequest(r, handler)
+	if err != nil {
+		return err, nil, nil
+	}
+
+	res := &response{}
+	rollback := func(w http.ResponseWriter) {
+		res.body, err = rm.migrateResponse(r, res.body, handler)
+		if err != nil {
+			// write an error to the client.
+			return
+		}
+
+		err = rm.writeResponseToClient(w, res)
+		if err != nil {
+			// write an error to the client.
+			return
+		}
+	}
+
+	return nil, res, rollback
+}
+
+func (rm *RequestMigration) migrateRequest(r *http.Request, handler string) error {
 	from, err := rm.getUserVersion(r)
 	if err != nil {
 		return err
@@ -165,7 +196,7 @@ func (rm *RequestMigration) VersionRequest(r *http.Request, handler string) erro
 	return nil
 }
 
-func (rm *RequestMigration) VersionResponse(r *http.Request, body []byte, handler string) ([]byte, error) {
+func (rm *RequestMigration) migrateResponse(r *http.Request, body []byte, handler string) ([]byte, error) {
 	from, err := rm.getUserVersion(r)
 	if err != nil {
 		return nil, err
@@ -238,6 +269,20 @@ func (rm *RequestMigration) observeRequestLatency(from, to *Version, sT time.Tim
 
 func (rm *RequestMigration) RegisterMetrics(reg *prometheus.Registry) {
 	reg.MustRegister(rm.metric)
+}
+
+func (rm *RequestMigration) writeResponseToClient(w http.ResponseWriter, res *response) error {
+	if res.statusCode != 0 {
+		w.WriteHeader(res.statusCode)
+	}
+
+	_, err := w.Write(res.body)
+	if err != nil {
+		return err
+	}
+
+	// TODO(subomi): log bytesWritten
+	return nil
 }
 
 type migrator struct {

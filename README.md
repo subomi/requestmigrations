@@ -12,16 +12,17 @@
 ```
 
 ## Usage
-This package primarily exposes two APIs - `VersionRequest` and `VersionResponse` used in your HTTP handlers to transform the request and response respectively. Here's an short example:
+This package exposes primarily one API - `Migrate`. It is used to migrate and rollback changes to your request and response respectively. Here's a short exmaple:
 
 ```go
 package main 
 
 func createUser(r *http.Request, w http.ResponseWriter) {
-  err := rm.VersionRequest(r, "createUser")
+  err, res, rollback := rm.Migrate(r, "createUser")
   if err != nil {
-    t.Fatal(err)
+     w.Write("Bad Request")
   }
+  defer rollback(w)
 
   payload, err := io.ReadAll(r.Body)
   if err != nil {
@@ -45,12 +46,7 @@ func createUser(r *http.Request, w http.ResponseWriter) {
     t.Fatal(err)
   }
 
-  resBody, err := rm.VersionResponse(r, body, "createUser")
-  if err != nil {
-    t.Fatal(err)
-  }
-
-  _, _ = w.Write(resBody)
+  res.SetBody(body)
 }
 
 ```
@@ -86,7 +82,7 @@ A migration is a struct that performs a migration on either a request or a respo
 
 Notice from the above that the migration struct name follows a particular structure. The structure adopted is `{handlerName}{MigrationType}`. The `handlerName` refers to the exact name of your handler. For example, if you have a handler named `LoginUser`, any migration on this handler should start with `LoginUser`. It'll also be what we use in `VersionRequest` and `VersionResponse`. The `MigrationType` can be `Request` or `Response`. We use this field to determine if the migration should run on the request or the response payload. 
 
-This library doesn't support multiple transformations per version as of the time of this writing. For example, no handler can have multiple changes for each version update. 
+This library doesn't support multiple transformations per version as of the time of this writing. For example, no handler can have multiple changes for the same version.
 
 
 ## License

@@ -131,10 +131,11 @@ func (c *createUserResponseCombineNamesMigration) Migrate(
 
 func createUser(t *testing.T, rm *RequestMigration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := rm.VersionRequest(r, "createUser")
+		err, res, rollback := rm.Migrate(r, "createUser")
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer rollback(w)
 
 		payload, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -158,12 +159,7 @@ func createUser(t *testing.T, rm *RequestMigration) http.Handler {
 			t.Fatal(err)
 		}
 
-		resBody, err := rm.VersionResponse(r, body, "createUser")
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		_, _ = w.Write(resBody)
+		res.SetBody(body)
 	})
 }
 
@@ -255,10 +251,11 @@ func Test_VersionRequest(t *testing.T) {
 
 func getUser(t *testing.T, rm *RequestMigration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := rm.VersionRequest(r, "getUser")
+		err, res, rollback := rm.Migrate(r, "getUser")
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer rollback(w)
 
 		user := &user{
 			Email:     "engineering@getconvoy.io",
@@ -271,12 +268,7 @@ func getUser(t *testing.T, rm *RequestMigration) http.Handler {
 			t.Fatal(err)
 		}
 
-		resBody, err := rm.VersionResponse(r, body, "getUser")
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		_, _ = w.Write(resBody)
+		res.SetBody(body)
 	})
 }
 
