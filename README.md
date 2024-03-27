@@ -26,13 +26,13 @@ func createUser(r *http.Request, w http.ResponseWriter) {
 
   payload, err := io.ReadAll(r.Body)
   if err != nil {
-    t.Fatal(err)
+    w.Write("Bad Request")
   }
 
   var userObject user
   err = json.Unmarshal(payload, &userObject)
   if err != nil {
-    t.Fatal(err)
+    w.Write("Bad Request")
   }
 
   userObject = user{
@@ -43,7 +43,7 @@ func createUser(r *http.Request, w http.ResponseWriter) {
 
   body, err := json.Marshal(userObject)
   if err != nil {
-    t.Fatal(err)
+    w.Write("Bad Request")
   }
 
   res.SetBody(body)
