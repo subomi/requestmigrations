@@ -140,13 +140,13 @@ func (rm *RequestMigration) RegisterMigrations(migrations MigrationStore) error 
 	return nil
 }
 
-func (rm *RequestMigration) Migrate(r *http.Request, handler string) (error, any, rollbackFn) {
+func (rm *RequestMigration) Migrate(r *http.Request, handler string) (error, *response, rollbackFn) {
 	err := rm.migrateRequest(r, handler)
 	if err != nil {
 		return err, nil, nil
 	}
 
-	var res *response
+	res := &response{}
 	rollback := func(w http.ResponseWriter) {
 		res.body, err = rm.migrateResponse(r, res.body, handler)
 		if err != nil {
@@ -267,7 +267,9 @@ func (rm *RequestMigration) RegisterMetrics(reg *prometheus.Registry) {
 }
 
 func (rm *RequestMigration) writeResponseToClient(w http.ResponseWriter, res *response) error {
-	w.WriteHeader(res.statusCode)
+	if res.statusCode != 0 {
+		w.WriteHeader(res.statusCode)
+	}
 
 	_, err := w.Write(res.body)
 	if err != nil {
