@@ -140,6 +140,11 @@ func (rm *RequestMigration) RegisterMigrations(migrations MigrationStore) error 
 	return nil
 }
 
+// Migrate is the core API for apply transformations to your handlers. It should be
+// called at the start of your handler to transform the body attached to your request
+// before further processing. To transform the response as well, you need to use
+// the rollback and res function to roll changes back and set the handler response
+// respectively.
 func (rm *RequestMigration) Migrate(r *http.Request, handler string) (error, *response, rollbackFn) {
 	err := rm.migrateRequest(r, handler)
 	if err != nil {
