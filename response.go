@@ -8,7 +8,7 @@ type response struct {
 	statusCode int
 }
 
-func (r *response) SetBody(body []byte) {
+func (r *response) Write(body []byte) {
 	r.body = body
 }
 

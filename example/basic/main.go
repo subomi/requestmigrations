@@ -1,7 +1,9 @@
 package main
 
 import (
-	"encoding/json"
+	"basicexample/helper"
+	v20230401 "basicexample/v20230401"
+	v20230501 "basicexample/v20230501"
 	"log"
 	"math/rand"
 	"net/http"
@@ -27,12 +29,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	rm.RegisterMigrations(rms.Migrations{
+	rm.RegisterMigrations(rms.MigrationStore{
 		"2023-05-01": []rms.Migration{
-			&expandProfileForUserMigration{},
+			&v20230501.ListUserResponseMigration{},
 		},
 		"2023-04-01": []rms.Migration{
-			&combineNamesForUserMigration{},
+			&v20230401.ListUserResponseMigration{},
 		},
 	})
 
@@ -55,8 +57,7 @@ func main() {
 func buildMux(api *API) http.Handler {
 	m := mux.NewRouter()
 
-	m.Handle("/users",
-		api.rm.VersionAPI(http.HandlerFunc(api.ListUser))).Methods("GET")
+	m.HandleFunc("/users", api.ListUser).Methods("GET")
 	m.HandleFunc("/users/{id}", api.GetUser).Methods("GET")
 
 	reg := prometheus.NewRegistry()
@@ -69,11 +70,6 @@ func buildMux(api *API) http.Handler {
 }
 
 // api models
-type ServerResponse struct {
-	Status  bool            `json:"status"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data,omitempty"`
-}
 
 // define api
 type API struct {
@@ -82,6 +78,14 @@ type API struct {
 }
 
 func (a *API) ListUser(w http.ResponseWriter, r *http.Request) {
+	err, vw, rollback := a.rm.Migrate(r, "ListUser")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	defer rollback(w)
+
 	// Generate a random Int type number between 1 and 10
 	randNum := rand.Intn(2-1+1) + 1
 	time.Sleep(time.Duration(randNum) * time.Second)
@@ -92,13 +96,13 @@ func (a *API) ListUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := generateSuccessResponse(users, "users retrieved successfully")
+	res, err := helper.GenerateSuccessResponse(users, "users retrieved successfully")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 
-	w.Write(res)
+	vw.Write(res)
 }
 
 func (a *API) GetUser(w http.ResponseWriter, r *http.Request) {
@@ -109,32 +113,11 @@ func (a *API) GetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := generateSuccessResponse(user, "user retrieved successfully")
+	res, err := helper.GenerateSuccessResponse(user, "user retrieved successfully")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 
 	w.Write(res)
-}
-
-// helpers
-func generateSuccessResponse(payload interface{}, message string) ([]byte, error) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	s := &ServerResponse{
-		Status:  true,
-		Message: message,
-		Data:    data,
-	}
-
-	res, err := json.Marshal(s)
-	if err != nil {
-		return nil, err
-	}
-
-	return res, nil
 }
