@@ -131,7 +131,7 @@ func (c *createUserResponseCombineNamesMigration) Migrate(
 
 func createUser(t *testing.T, rm *RequestMigration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err, res, rollback := rm.Migrate(r, "createUser")
+		err, vw, rollback := rm.Migrate(r, "createUser")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,7 +159,7 @@ func createUser(t *testing.T, rm *RequestMigration) http.Handler {
 			t.Fatal(err)
 		}
 
-		res.SetBody(body)
+		vw.Write(body)
 	})
 }
 
@@ -251,7 +251,7 @@ func Test_VersionRequest(t *testing.T) {
 
 func getUser(t *testing.T, rm *RequestMigration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err, res, rollback := rm.Migrate(r, "getUser")
+		err, vw, rollback := rm.Migrate(r, "getUser")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -268,7 +268,7 @@ func getUser(t *testing.T, rm *RequestMigration) http.Handler {
 			t.Fatal(err)
 		}
 
-		res.SetBody(body)
+		vw.Write(body)
 	})
 }
 
