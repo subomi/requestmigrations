@@ -1,5 +1,5 @@
 # requestmigrations <br /> [![Go Reference](https://pkg.go.dev/badge/github.com/subomi/requestmigrations.svg)](https://pkg.go.dev/github.com/subomi/requestmigrations)
-`requestmigrations` is a Golang implementation of [rolling versions](https://stripe.com/blog/api-versioning) for REST APIs. It's a port of the [Ruby implementation](https://github.com/keygen-sh/request_migrations) by [ezekg](https://github.com/ezekg).
+`requestmigrations` is a Golang implementation of [rolling versions](https://stripe.com/blog/api-versioning) for REST APIs. It's a port of the [Ruby implementation](https://github.com/keygen-sh/request_migrations) by [ezekg](https://github.com/ezekg). We use in production with [Convoy](https://github.com/frain-dev/convoy).
 
 ## Features
 - API Versioning with date and semver versioning support.
@@ -12,41 +12,34 @@
 ```
 
 ## Usage
-This package exposes primarily one API - `Migrate`. It is used to migrate and rollback changes to your request and response respectively. Here's a short exmaple:
+This package exposes primarily one API - `Migrate`. It is used to migrate and rollback changes to your request and response respectively. Here's a short example:
 
 ```go
 package main 
 
 func createUser(r *http.Request, w http.ResponseWriter) {
-  err, res, rollback := rm.Migrate(r, "createUser")
+  // Identify version and transform the request payload.
+  err, vw, rollback := rm.Migrate(r, "createUser")
   if err != nil {
      w.Write("Bad Request")
   }
+
+  // Setup response transformation callback.
   defer rollback(w)
 
-  payload, err := io.ReadAll(r.Body)
+  // ...Perform core business logic...
+  data, err := createUserObject(body)
+  if err != nil {
+    return err 
+  }
+
+  // Write response
+  body, err := json.Marshal(data)
   if err != nil {
     w.Write("Bad Request")
   }
 
-  var userObject user
-  err = json.Unmarshal(payload, &userObject)
-  if err != nil {
-    w.Write("Bad Request")
-  }
-
-  userObject = user{
-    Email:     userObject.Email,
-    FirstName: userObject.FirstName,
-    LastName:  userObject.LastName,
-  }
-
-  body, err := json.Marshal(userObject)
-  if err != nil {
-    w.Write("Bad Request")
-  }
-
-  res.SetBody(body)
+  vw.Write(body)
 }
 
 ```
