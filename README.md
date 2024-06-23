@@ -81,19 +81,23 @@ This library doesn't support multiple transformations per version as of the time
 Check the [example](./example) directory for a full example. Do the following to run the example:
 
 ```bash 
-git clone https://github.com/subomi/requestmigrations 
+$ git clone https://github.com/subomi/requestmigrations 
 
-cd example/basic 
+$ cd example/basic 
 
-go run *.go
+$ go run *.go
 
-# Open another terminal in the same directory 
+# Open another terminal in the same directory to run 
+# call the API and observe different responses from the same API.
 
-# This retrieves the latest API without versioning.
-./call_api.sh -r lu 
+# Call the API without specifying a version.
+$ curl -s localhost:9000/users \
+  -H "Content-Type: application/json" | jq
 
-# This retrieves the API on a previous version.
-./call_api.sh -r lvu
+# Call the API with 2023-04-01 version.
+$ curl -s localhost:9000/users \ 
+  -H "Content-Type: application/json" \
+  -H "X-Example-Version: 2023-04-01" | jq
 ```
 
 ## License
