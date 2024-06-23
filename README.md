@@ -80,16 +80,17 @@ This library doesn't support multiple transformations per version as of the time
 ## Example
 Check the [example](./example) directory for a full example. Do the following to run the example:
 
+1. Run the server.
 ```bash 
 $ git clone https://github.com/subomi/requestmigrations 
 
 $ cd example/basic 
 
 $ go run *.go
+```
 
-# Open another terminal in the same directory to run 
-# call the API and observe different responses from the same API.
-
+2. Open another terminal and call the server
+```bash
 # Call the API without specifying a version.
 $ curl -s localhost:9000/users \
   -H "Content-Type: application/json" | jq
