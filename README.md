@@ -77,6 +77,29 @@ Notice from the above that the migration struct name follows a particular struct
 
 This library doesn't support multiple transformations per version as of the time of this writing. For example, no handler can have multiple changes for the same version.
 
+## Example
+Check the [example](./example) directory for a full example. Do the following to run the example:
+
+1. Run the server.
+```bash 
+$ git clone https://github.com/subomi/requestmigrations 
+
+$ cd example/basic 
+
+$ go run *.go
+```
+
+2. Open another terminal and call the server
+```bash
+# Call the API without specifying a version.
+$ curl -s localhost:9000/users \
+  -H "Content-Type: application/json" | jq
+
+# Call the API with 2023-04-01 version.
+$ curl -s localhost:9000/users \ 
+  -H "Content-Type: application/json" \
+  -H "X-Example-Version: 2023-04-01" | jq
+```
 
 ## License
 MIT License
