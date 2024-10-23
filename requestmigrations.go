@@ -22,10 +22,10 @@ const (
 )
 
 var (
-	ErrServerError                 = errors.New("Server error")
-	ErrInvalidVersion              = errors.New("Invalid version number")
-	ErrInvalidVersionFormat        = errors.New("Invalid version format")
-	ErrCurrentVersionCannotBeEmpty = errors.New("Current Version field cannot be empty")
+	ErrServerError                 = errors.New("server error")
+	ErrInvalidVersion              = errors.New("invalid version number")
+	ErrInvalidVersionFormat        = errors.New("invalid version format")
+	ErrCurrentVersionCannotBeEmpty = errors.New("current version field cannot be empty")
 )
 
 // Migration is the core interface each transformation in every version
@@ -38,12 +38,12 @@ type Migration interface {
 // Migrations is an array of migrations declared by each handler.
 type Migrations []Migration
 
-// migrations := Migrations{
-//   "2023-02-28": []Migration{
-//     Migration{},
-//	   Migration{},
-//	 },
-// }
+//	migrations := Migrations{
+//	  "2023-02-28": []Migration{
+//	    Migration{},
+//		   Migration{},
+//		 },
+//	}
 type MigrationStore map[string]Migrations
 
 type GetUserVersionFunc func(req *http.Request) (string, error)
@@ -242,6 +242,21 @@ func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) 
 		Format: rm.opts.VersionFormat,
 		Value:  rm.iv,
 	}, nil
+}
+
+func (rm *RequestMigration) WriteVersionHeader() func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			version, err := rm.getUserVersion(r)
+			if err != nil {
+				// fail silently
+				next.ServeHTTP(w, r)
+			}
+
+			w.Header().Set(rm.opts.VersionHeader, version.String())
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func (rm *RequestMigration) getCurrentVersion() *Version {
