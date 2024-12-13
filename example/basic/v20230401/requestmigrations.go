@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Migrations
+// ListUserResponseMigration handles the response migration for the list users endpoint
 type ListUserResponseMigration struct{}
 
 func (c *ListUserResponseMigration) Migrate(
@@ -53,6 +53,10 @@ func (c *ListUserResponseMigration) Migrate(
 	}
 
 	return body, h, nil
+}
+
+func (c *ListUserResponseMigration) ChangeDescription() string {
+	return "Combined firstName and lastName fields into a single fullName field in user response"
 }
 
 type oldUser20230501 struct {

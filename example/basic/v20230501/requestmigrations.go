@@ -23,17 +23,7 @@ type profile struct {
 	TwitterURL string `json:"twitter_url"`
 }
 
-// Migrations
-type oldUser20230501 struct {
-	UID       string    `json:"uid"`
-	Email     string    `json:"email"`
-	FirstName string    `json:"first_name"`
-	LastName  string    `json:"last_name"`
-	Profile   string    `json:"profile"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
+// ListUserResponseMigration handles the response migration for the list users endpoint
 type ListUserResponseMigration struct{}
 
 func (e *ListUserResponseMigration) Migrate(
@@ -69,4 +59,18 @@ func (e *ListUserResponseMigration) Migrate(
 	}
 
 	return body, h, nil
+}
+
+func (e *ListUserResponseMigration) ChangeDescription() string {
+	return "Expanded profile field to include GitHub and Twitter URLs"
+}
+
+type oldUser20230501 struct {
+	UID       string    `json:"uid"`
+	Email     string    `json:"email"`
+	FirstName string    `json:"first_name"`
+	LastName  string    `json:"last_name"`
+	Profile   string    `json:"profile"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }

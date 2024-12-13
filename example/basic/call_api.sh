@@ -6,6 +6,7 @@ helpFunc() {
 	echo -e "\t-r Specify request type, see options below:"
 	echo -e "\t   - lu: list users without versioning"
 	echo -e "\t   - lvu: list users with versioning"
+	echo -e "\t   - cl: get changelog"
 	exit 1
 }
 
@@ -31,6 +32,10 @@ while getopts ":n:r:" opt; do
 						-H "Content-Type: application/json" \
 						-H "X-Example-Version: 2023-04-01" | jq
 				done
+
+			elif [[ "$req" == "cl" ]]; then
+				curl -s localhost:9000/changelog \
+					-H "Content-Type: application/json" | jq
 
 			else
 				helpFunc
