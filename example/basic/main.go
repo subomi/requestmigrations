@@ -4,6 +4,7 @@ import (
 	"basicexample/helper"
 	v20230401 "basicexample/v20230401"
 	v20230501 "basicexample/v20230501"
+	"encoding/json"
 	"log"
 	"math/rand"
 	"net/http"
@@ -59,6 +60,7 @@ func buildMux(api *API) http.Handler {
 
 	m.HandleFunc("/users", api.ListUser).Methods("GET")
 	m.HandleFunc("/users/{id}", api.GetUser).Methods("GET")
+	m.HandleFunc("/changelog", api.handleChangelog).Methods(http.MethodGet)
 
 	reg := prometheus.NewRegistry()
 	api.rm.RegisterMetrics(reg)
@@ -120,4 +122,15 @@ func (a *API) GetUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Write(res)
+}
+
+func (a *API) handleChangelog(w http.ResponseWriter, r *http.Request) {
+	changelog, err := a.rm.GenerateChangelog()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(changelog)
 }
