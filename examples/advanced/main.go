@@ -142,8 +142,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("Unmarshaled from v2023-01-01 to Current:\n")
-	fmt.Printf("User Username: %s\n", incoming.Users[0].Username)
-	fmt.Printf("Project Count: %d\n", len(incoming.Projects))
-	fmt.Printf("Project 'p1' Name: %s\n", incoming.Projects["p1"].Name)
+	incomingJSON, _ := json.MarshalIndent(incoming, "", "  ")
+	fmt.Printf("Unmarshaled from v2023-01-01 to Current:\n%s\n", string(incomingJSON))
 }
