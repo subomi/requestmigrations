@@ -1,6 +1,9 @@
 # requestmigrations <br /> [![Go Reference](https://pkg.go.dev/badge/github.com/subomi/requestmigrations/v2.svg)](https://pkg.go.dev/github.com/subomi/requestmigrations/v2)
 `requestmigrations` is a Golang implementation of [rolling versions](https://stripe.com/blog/api-versioning) for REST APIs. It's a port of the [Ruby implementation](https://github.com/keygen-sh/request_migrations) by [ezekg](https://github.com/ezekg). We use in production with [Convoy](https://github.com/frain-dev/convoy).
 
+> [!NOTE]
+> This README describes **v2** of requestmigrations. For older versions, please check the [release tags](https://github.com/subomi/requestmigrations/tags).
+
 #### Built By
 <a href="https://getconvoy.io/?utm_source=requestmigrations">
 <img src="https://getconvoy.io/svg/convoy-logo-full-new.svg" alt="Sponsored by Convoy"></a>
