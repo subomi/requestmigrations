@@ -1,22 +1,53 @@
 package requestmigrations
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-type user struct {
-	Email     string `json:"email"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
+// v1 - 2023-02-01
+type profile struct {
+	Name    string `json:"name"`
+	Address string `json:"address"`
+}
+
+// v2 - 2023-03-01
+type profilev2 struct {
+	FirstName string `json:"firstName"`
+	LastName  string `json:"lastName"`
+	Address   *address
+}
+
+type address struct {
+	StreetName string `json:"streetName"`
+	Country    string `json:"country"`
+	State      string `json:"state"`
+	Postcode   string `json:"postCode"`
+}
+
+type addressMigration struct{}
+
+func (m *addressMigration) MigrateForward(data any) (any, error) {
+	return nil, nil
+}
+
+func (m *addressMigration) MigrateBackward(data any) (any, error) {
+	a, ok := data.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("bad type")
+	}
+
+	addrString := fmt.Sprintf("%s %s %s %s", a["streetName"],
+		a["state"], a["country"], a["postCode"])
+
+	return []byte(addrString), nil
 }
 
 func newRequestMigration(t *testing.T) *RequestMigration {
@@ -34,310 +65,234 @@ func newRequestMigration(t *testing.T) *RequestMigration {
 	return rm
 }
 
-func registerBasicMigrations(t *testing.T, rm *RequestMigration) {
-	migrations := &MigrationStore{
-		"2023-03-01": Migrations{
-			&getUserResponseCombineNamesMigration{},
-			&createUserRequestSplitNameMigration{},
-			&createUserResponseCombineNamesMigration{},
-		},
-	}
+func registerVersions(t *testing.T, rm *RequestMigration) {
+	// Register migrations for version 2023-03-01
+	err := Register[address](rm, "2023-03-01", &addressMigration{})
 
-	err := rm.RegisterMigrations(*migrations)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 }
 
-type oldUser struct {
-	Email    string `json:"email"`
-	FullName string `json:"full_name"`
-}
-
-type getUserResponseCombineNamesMigration struct{}
-
-func (c *getUserResponseCombineNamesMigration) Migrate(
-	body []byte,
-	h http.Header) ([]byte, http.Header, error) {
-
-	var newuser user
-	err := json.Unmarshal(body, &newuser)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var user oldUser
-	user.Email = newuser.Email
-	user.FullName = strings.Join([]string{newuser.FirstName, newuser.LastName}, " ")
-
-	body, err = json.Marshal(&user)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return body, h, nil
-}
-
-type createUserRequestSplitNameMigration struct{}
-
-func (c *createUserRequestSplitNameMigration) Migrate(
-	body []byte,
-	h http.Header) ([]byte, http.Header, error) {
-
-	var oUser oldUser
-	err := json.Unmarshal(body, &oUser)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var nUser user
-	nUser.Email = oUser.Email
-
-	splitName := strings.Split(oUser.FullName, " ")
-	nUser.FirstName = splitName[0]
-	nUser.LastName = splitName[1]
-
-	body, err = json.Marshal(&nUser)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return body, h, nil
-}
-
-type createUserResponseCombineNamesMigration struct{}
-
-func (c *createUserResponseCombineNamesMigration) Migrate(
-	body []byte,
-	h http.Header) ([]byte, http.Header, error) {
-
-	var newuser user
-	err := json.Unmarshal(body, &newuser)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var user oldUser
-	user.Email = newuser.Email
-	user.FullName = strings.Join([]string{newuser.FirstName, newuser.LastName}, " ")
-
-	body, err = json.Marshal(&user)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return body, h, nil
-}
-
-func createUser(t *testing.T, rm *RequestMigration) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err, vw, rollback := rm.Migrate(r, "createUser")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer rollback(w)
-
-		payload, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		var userObject user
-		err = json.Unmarshal(payload, &userObject)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		userObject = user{
-			Email:     userObject.Email,
-			FirstName: userObject.FirstName,
-			LastName:  userObject.LastName,
-		}
-
-		body, err := json.Marshal(userObject)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		vw.Write(body)
-	})
-}
-
-func Test_VersionRequest(t *testing.T) {
+func Test_Marshal(t *testing.T) {
 	rm := newRequestMigration(t)
-	registerBasicMigrations(t, rm)
+	registerVersions(t, rm)
 
 	tests := map[string]struct {
-		assert        require.ErrorAssertionFunc
-		body          strings.Reader
-		addHeader     func(req *http.Request)
-		parseResponse func(t *testing.T, data []byte) error
+		assert require.ErrorAssertionFunc
 	}{
 		"no_transformation": {
 			assert: require.NoError,
-			body: *strings.NewReader(`
-				{
-					"email": "engineering@getconvoy.io",
-					"first_name": "Convoy",
-					"last_name": "Engineering"
-				}
-			`),
-			addHeader: func(req *http.Request) {
-				req.Header.Add("X-Test-Version", "2023-03-01")
-			},
-			parseResponse: func(t *testing.T, data []byte) error {
-				var newUser user
-				err := json.Unmarshal(data, &newUser)
-				if err != nil {
-					return err
-				}
-
-				if isStringEmpty(newUser.FirstName) || isStringEmpty(newUser.LastName) {
-					return errors.New("Firstname or Lastname is not present")
-				}
-
-				return nil
-			},
-		},
-		"should_transform_request_payload": {
-			assert: require.NoError,
-			body: *strings.NewReader(`
-				{
-					"email": "engineering@getconvoy.io",
-					"full_name": "Convoy Engineering"
-				}
-			`),
-			parseResponse: func(t *testing.T, data []byte) error {
-				var user oldUser
-				err := json.Unmarshal(data, &user)
-				if err != nil {
-					return err
-				}
-
-				if isStringEmpty(user.FullName) {
-					return errors.New("Fullname is not present")
-				}
-
-				return nil
-			},
 		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/users", &tc.body)
+			req := httptest.NewRequest(http.MethodGet, "/profile", strings.NewReader(""))
+			req.Header.Add("X-Test-Version", "2023-02-01")
 
-			if tc.addHeader != nil {
-				tc.addHeader(req)
+			pStruct := profilev2{
+				Address: &address{
+					State:    "London",
+					Postcode: "CR0 1GB",
+				},
 			}
+			bytesW, err := rm.WithUserVersion(req).Marshal(&pStruct)
 
-			rr := httptest.NewRecorder()
-
-			createUserHandler := createUser(t, rm)
-			createUserHandler.ServeHTTP(rr, req)
-
-			// Inspect response to determine it worked.
-			data, err := io.ReadAll(bytes.NewReader(rr.Body.Bytes()))
-			if err != nil {
-				t.Error(err)
-			}
-
-			// Assert.
-			tc.assert(t, tc.parseResponse(t, data))
+			_ = bytesW
+			tc.assert(t, err)
 		})
 	}
-
 }
 
-func getUser(t *testing.T, rm *RequestMigration) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err, vw, rollback := rm.Migrate(r, "getUser")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer rollback(w)
+func Test_Unmarshal(t *testing.T) {}
 
-		user := &user{
-			Email:     "engineering@getconvoy.io",
-			FirstName: "Convoy",
-			LastName:  "Engineering",
-		}
+type AddressString string
 
-		body, err := json.Marshal(user)
-		if err != nil {
-			t.Fatal(err)
-		}
+type addressStringMigration struct{}
 
-		vw.Write(body)
+func (m *addressStringMigration) MigrateForward(data any) (any, error) {
+	s, ok := data.(string)
+	if !ok {
+		return nil, fmt.Errorf("bad type")
+	}
+	return AddressString("Migrated: " + s), nil
+}
+
+func (m *addressStringMigration) MigrateBackward(data any) (any, error) {
+	s, ok := data.(string)
+	if !ok {
+		return nil, fmt.Errorf("bad type")
+	}
+	return "Backward: " + s, nil
+}
+
+type CustomUser struct {
+	Address AddressString `json:"address"`
+}
+
+func Test_CustomPrimitive(t *testing.T) {
+	opts := &RequestMigrationOptions{
+		VersionHeader:  "X-Test-Version",
+		CurrentVersion: "2023-03-01",
+		VersionFormat:  DateFormat,
+	}
+	rm, _ := NewRequestMigration(opts)
+	Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+
+	t.Run("Marshal custom primitive", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-02-01")
+
+		u := CustomUser{Address: "Main St"}
+		data, err := rm.WithUserVersion(req).Marshal(&u)
+		require.NoError(t, err)
+
+		var res map[string]interface{}
+		json.Unmarshal(data, &res)
+		require.Equal(t, "Backward: Main St", res["address"])
+	})
+
+	t.Run("Unmarshal custom primitive", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-02-01")
+
+		jsonData := `{"address": "Main St"}`
+		var u CustomUser
+		err := rm.WithUserVersion(req).Unmarshal([]byte(jsonData), &u)
+		require.NoError(t, err)
+		require.Equal(t, AddressString("Migrated: Main St"), u.Address)
 	})
 }
 
-func Test_VersionResponse(t *testing.T) {
-	rm := newRequestMigration(t)
-	registerBasicMigrations(t, rm)
+type CyclicUser struct {
+	ID        string           `json:"id"`
+	Workspace *CyclicWorkspace `json:"workspace"`
+}
 
-	tests := map[string]struct {
-		assert        require.ErrorAssertionFunc
-		addHeader     func(req *http.Request)
-		parseResponse func(t *testing.T, data []byte) error
-	}{
-		"no_transformation": {
-			assert: require.NoError,
-			addHeader: func(req *http.Request) {
-				req.Header.Add("X-Test-Version", "2023-03-01")
-			},
-			parseResponse: func(t *testing.T, data []byte) error {
-				var newUser user
-				err := json.Unmarshal(data, &newUser)
-				if err != nil {
-					return err
-				}
+type CyclicWorkspace struct {
+	ID    string        `json:"id"`
+	Users []*CyclicUser `json:"users"`
+}
 
-				if isStringEmpty(newUser.FirstName) || isStringEmpty(newUser.LastName) {
-					return errors.New("Firstname or Lastname is not present")
-				}
-
-				return nil
-			},
-		},
-		"should_transform_response_payload": {
-			assert: require.NoError,
-			parseResponse: func(t *testing.T, data []byte) error {
-				var user oldUser
-				err := json.Unmarshal(data, &user)
-				if err != nil {
-					return err
-				}
-
-				if isStringEmpty(user.FullName) {
-					return errors.New("Fullname is not present")
-				}
-
-				return nil
-			},
-		},
+func Test_Cycles(t *testing.T) {
+	opts := &RequestMigrationOptions{
+		VersionHeader:  "X-Test-Version",
+		CurrentVersion: "2023-03-01",
+		VersionFormat:  DateFormat,
 	}
+	rm, _ := NewRequestMigration(opts)
 
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/users", strings.NewReader(""))
-			if tc.addHeader != nil {
-				tc.addHeader(req)
-			}
+	t.Run("Build graph with cycles", func(t *testing.T) {
+		_, err := rm.buildTypeGraph(reflect.TypeOf(CyclicUser{}), &Version{Format: DateFormat, Value: "2023-01-01"})
+		require.NoError(t, err)
+	})
+}
 
-			rr := httptest.NewRecorder()
-
-			getUserHandler := getUser(t, rm)
-			getUserHandler.ServeHTTP(rr, req)
-
-			// Inspect response to determine it worked.
-			data, err := io.ReadAll(bytes.NewReader(rr.Body.Bytes()))
-			if err != nil {
-				t.Error(err)
-			}
-
-			// Assert.
-			tc.assert(t, tc.parseResponse(t, data))
-		})
+func Test_RootSlice(t *testing.T) {
+	opts := &RequestMigrationOptions{
+		VersionHeader:  "X-Test-Version",
+		CurrentVersion: "2023-03-01",
+		VersionFormat:  DateFormat,
 	}
+	rm, _ := NewRequestMigration(opts)
+	Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+
+	t.Run("Marshal root slice", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-02-01")
+
+		users := []CustomUser{
+			{Address: "Main St"},
+			{Address: "Second St"},
+		}
+		data, err := rm.WithUserVersion(req).Marshal(&users)
+		require.NoError(t, err)
+
+		var res []map[string]interface{}
+		json.Unmarshal(data, &res)
+		require.Len(t, res, 2)
+		require.Equal(t, "Backward: Main St", res[0]["address"])
+		require.Equal(t, "Backward: Second St", res[1]["address"])
+	})
+
+	t.Run("Unmarshal root slice", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-02-01")
+
+		jsonData := `[{"address": "Main St"}, {"address": "Second St"}]`
+		var users []CustomUser
+		err := rm.WithUserVersion(req).Unmarshal([]byte(jsonData), &users)
+		require.NoError(t, err)
+		require.Len(t, users, 2)
+		require.Equal(t, AddressString("Migrated: Main St"), users[0].Address)
+		require.Equal(t, AddressString("Migrated: Second St"), users[1].Address)
+	})
+}
+
+type chainMigrationV2 struct{}
+
+func (m *chainMigrationV2) MigrateForward(data any) (any, error) {
+	s := data.(string)
+	return s + " -> v2", nil
+}
+func (m *chainMigrationV2) MigrateBackward(data any) (any, error) {
+	s := data.(string)
+	return s + " -> v1", nil
+}
+
+type chainMigrationV3 struct{}
+
+func (m *chainMigrationV3) MigrateForward(data any) (any, error) {
+	s := data.(string)
+	return s + " -> v3", nil
+}
+func (m *chainMigrationV3) MigrateBackward(data any) (any, error) {
+	s := data.(string)
+	return s + " -> v2", nil
+}
+
+func Test_VersionChain(t *testing.T) {
+	opts := &RequestMigrationOptions{
+		VersionHeader:  "X-Test-Version",
+		CurrentVersion: "2023-03-01",
+		VersionFormat:  DateFormat,
+	}
+	rm, _ := NewRequestMigration(opts)
+
+	// v1: 2023-01-01 (initial version, no migrations)
+	// v2: 2023-02-01
+	Register[AddressString](rm, "2023-02-01", &chainMigrationV2{})
+	// v3: 2023-03-01
+	Register[AddressString](rm, "2023-03-01", &chainMigrationV3{})
+
+	t.Run("Marshal chain v1 to v3", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-01-01")
+
+		type User struct {
+			Address AddressString `json:"address"`
+		}
+		u := User{Address: "start"}
+		data, err := rm.WithUserVersion(req).Marshal(&u)
+		require.NoError(t, err)
+
+		var res map[string]interface{}
+		json.Unmarshal(data, &res)
+		require.Equal(t, "start -> v2 -> v1", res["address"])
+	})
+
+	t.Run("Unmarshal chain v1 to v3", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-01-01")
+
+		type User struct {
+			Address AddressString `json:"address"`
+		}
+		jsonData := `{"address": "start"}`
+		var u User
+		err := rm.WithUserVersion(req).Unmarshal([]byte(jsonData), &u)
+		require.NoError(t, err)
+		require.Equal(t, AddressString("start -> v2 -> v3"), u.Address)
+	})
 }

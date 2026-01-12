@@ -2,8 +2,6 @@ package main
 
 import (
 	"basicexample/helper"
-	v20230401 "basicexample/v20230401"
-	v20230501 "basicexample/v20230501"
 	"log"
 	"math/rand"
 	"net/http"
@@ -14,7 +12,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	rms "github.com/subomi/requestmigrations"
+	rms "github.com/subomi/requestmigrations/v2"
 )
 
 func main() {
@@ -29,14 +27,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	rm.RegisterMigrations(rms.MigrationStore{
-		"2023-05-01": []rms.Migration{
-			&v20230501.ListUserResponseMigration{},
-		},
-		"2023-04-01": []rms.Migration{
-			&v20230401.ListUserResponseMigration{},
-		},
-	})
+	// Register migrations for the User and profile types
+	rms.Register[User](rm, "2023-05-01", &UserMigration{})
+	rms.Register[profile](rm, "2023-05-01", &ProfileMigration{})
 
 	api := &API{rm: rm, store: userStore}
 	backend := http.Server{
@@ -44,14 +37,17 @@ func main() {
 		Handler: buildMux(api),
 	}
 
-	err = backend.ListenAndServe()
-	if err != nil {
-		log.Fatal(err)
-	}
+	go func() {
+		log.Println("Starting server on :9000")
+		if err := backend.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
+		}
+	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
 	<-quit
+	log.Println("Shutting down server...")
 }
 
 func buildMux(api *API) http.Handler {
@@ -69,25 +65,14 @@ func buildMux(api *API) http.Handler {
 	return m
 }
 
-// api models
-
-// define api
 type API struct {
 	store *Store
 	rm    *rms.RequestMigration
 }
 
 func (a *API) ListUser(w http.ResponseWriter, r *http.Request) {
-	err, vw, rollback := a.rm.Migrate(r, "ListUser")
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	defer rollback(w)
-
-	// Generate a random Int type number between 1 and 10
-	randNum := rand.Intn(2-1+1) + 1
+	// Generate a random delay
+	randNum := rand.Intn(2) + 1
 	time.Sleep(time.Duration(randNum) * time.Second)
 
 	users, err := a.store.GetAll()
@@ -96,13 +81,21 @@ func (a *API) ListUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := helper.GenerateSuccessResponse(users, "users retrieved successfully")
+	// Use the new API to marshal and migrate the users
+	data, err := a.rm.WithUserVersion(r).Marshal(users)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	res, err := helper.GenerateSuccessResponseFromRaw(data, "users retrieved successfully")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 
-	vw.Write(res)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(res)
 }
 
 func (a *API) GetUser(w http.ResponseWriter, r *http.Request) {
@@ -113,11 +106,19 @@ func (a *API) GetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := helper.GenerateSuccessResponse(user, "user retrieved successfully")
+	// Use the new API to marshal and migrate the user
+	data, err := a.rm.WithUserVersion(r).Marshal(user)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	res, err := helper.GenerateSuccessResponseFromRaw(data, "user retrieved successfully")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.Write(res)
 }

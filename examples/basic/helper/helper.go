@@ -14,6 +14,10 @@ func GenerateSuccessResponse(payload interface{}, message string) ([]byte, error
 		return nil, err
 	}
 
+	return GenerateSuccessResponseFromRaw(data, message)
+}
+
+func GenerateSuccessResponseFromRaw(data json.RawMessage, message string) ([]byte, error) {
 	s := &ServerResponse{
 		Status:  true,
 		Message: message,

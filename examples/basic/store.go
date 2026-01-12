@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"sync"
 	"time"
 )
 
@@ -72,7 +71,6 @@ type profile struct {
 }
 
 type Store struct {
-	mu    sync.Mutex
 	users []*User
 }
 
@@ -83,7 +81,7 @@ func (s *Store) Get(id string) (*User, error) {
 		}
 	}
 
-	return nil, errors.New("Not Found")
+	return nil, errors.New("not found")
 }
 
 func (s *Store) GetAll() ([]*User, error) {

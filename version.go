@@ -60,6 +60,38 @@ func (v *Version) Equal(vv *Version) bool {
 
 	return false
 }
+
+func (v *Version) isOlderThan(vv *Version) bool {
+	switch v.Format {
+	case SemverFormat:
+		sv, err := semver.NewVersion(v.Value.(string))
+		if err != nil {
+			return false
+		}
+
+		svv, err := semver.NewVersion(vv.Value.(string))
+		if err != nil {
+			return false
+		}
+
+		return sv.LessThan(svv)
+
+	case DateFormat:
+		tv, err := time.Parse(time.DateOnly, v.Value.(string))
+		if err != nil {
+			return false
+		}
+
+		tvv, err := time.Parse(time.DateOnly, vv.Value.(string))
+		if err != nil {
+			return false
+		}
+
+		return tv.Before(tvv)
+	}
+
+	return false
+}
 func (v *Version) String() string {
 	return v.Value.(string)
 }

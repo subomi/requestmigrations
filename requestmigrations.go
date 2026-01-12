@@ -1,9 +1,8 @@
 package requestmigrations
 
 import (
-	"bytes"
+	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"reflect"
 	"sort"
@@ -28,31 +27,13 @@ var (
 	ErrCurrentVersionCannotBeEmpty = errors.New("current version field cannot be empty")
 )
 
-// Migration is the core interface each transformation in every version
-// needs to implement. It includes two predicate functions and two
-// transformation functions.
-type Migration interface {
-	Migrate(data []byte, header http.Header) ([]byte, http.Header, error)
-}
-
-// Migrations is an array of migrations declared by each handler.
-type Migrations []Migration
-
-//	migrations := Migrations{
-//	  "2023-02-28": []Migration{
-//	    Migration{},
-//		   Migration{},
-//		 },
-//	}
-type MigrationStore map[string]Migrations
-
 type GetUserVersionFunc func(req *http.Request) (string, error)
 
 // RequestMigrationOptions is used to configure the RequestMigration type.
 type RequestMigrationOptions struct {
 	// VersionHeader refers to the header value used to retrieve the request's
 	// version. If VersionHeader is empty, we call the GetUserVersionFunc to
-	// retrive the user's version.
+	// retrieve the user's version.
 	VersionHeader string
 
 	// CurrentVersion refers to the API's most recent version. This value should
@@ -69,8 +50,6 @@ type RequestMigrationOptions struct {
 	VersionFormat VersionFormat
 }
 
-type rollbackFn func(w http.ResponseWriter)
-
 // RequestMigration is the exported type responsible for handling request migrations.
 type RequestMigration struct {
 	opts     *RequestMigrationOptions
@@ -78,8 +57,18 @@ type RequestMigration struct {
 	metric   *prometheus.HistogramVec
 	iv       string
 
-	mu         sync.Mutex
-	migrations MigrationStore
+	mu         *sync.Mutex
+	migrations map[reflect.Type]map[string]TypeMigration // type -> version -> migration
+
+	cacheMu *sync.RWMutex
+	cache   map[graphCacheKey]*TypeGraph
+
+	request *http.Request // context for a specific request
+}
+
+type graphCacheKey struct {
+	t       reflect.Type
+	version string
 }
 
 func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, error) {
@@ -97,17 +86,14 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 	}, []string{"from", "to"})
 
 	var iv string
-	if opts.VersionFormat == DateFormat {
+	switch opts.VersionFormat {
+	case DateFormat:
 		iv = new(time.Time).Format(time.DateOnly)
-	} else if opts.VersionFormat == SemverFormat {
+	case SemverFormat:
 		iv = "v0"
 	}
 
-	migrations := MigrationStore{
-		iv: []Migration{},
-	}
-
-	var versions []*Version
+	versions := make([]*Version, 0, 1)
 	versions = append(versions, &Version{Format: opts.VersionFormat, Value: iv})
 
 	return &RequestMigration{
@@ -115,109 +101,15 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 		metric:     me,
 		iv:         iv,
 		versions:   versions,
-		migrations: migrations,
+		mu:         new(sync.Mutex),
+		migrations: make(map[reflect.Type]map[string]TypeMigration),
+		cacheMu:    new(sync.RWMutex),
+		cache:      make(map[graphCacheKey]*TypeGraph),
 	}, nil
 }
 
-func (rm *RequestMigration) RegisterMigrations(migrations MigrationStore) error {
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
-
-	for k, v := range migrations {
-		rm.migrations[k] = v
-		rm.versions = append(rm.versions, &Version{Format: rm.opts.VersionFormat, Value: k})
-	}
-
-	switch rm.opts.VersionFormat {
-	case SemverFormat:
-		sort.Slice(rm.versions, semVerSorter(rm.versions))
-	case DateFormat:
-		sort.Slice(rm.versions, dateVersionSorter(rm.versions))
-	default:
-		return ErrInvalidVersionFormat
-	}
-
-	return nil
-}
-
-// Migrate is the core API for apply transformations to your handlers. It should be
-// called at the start of your handler to transform the body attached to your request
-// before further processing. To transform the response as well, you need to use
-// the rollback and res function to roll changes back and set the handler response
-// respectively.
-func (rm *RequestMigration) Migrate(r *http.Request, handler string) (error, *response, rollbackFn) {
-	err := rm.migrateRequest(r, handler)
-	if err != nil {
-		return err, nil, nil
-	}
-
-	res := &response{}
-	rollback := func(w http.ResponseWriter) {
-		res.body, err = rm.migrateResponse(r, res.body, handler)
-		if err != nil {
-			// write an error to the client.
-			return
-		}
-
-		err = rm.writeResponseToClient(w, res)
-		if err != nil {
-			// write an error to the client.
-			return
-		}
-	}
-
-	return nil, res, rollback
-}
-
-func (rm *RequestMigration) migrateRequest(r *http.Request, handler string) error {
-	from, err := rm.getUserVersion(r)
-	if err != nil {
-		return err
-	}
-
-	to := rm.getCurrentVersion()
-	m, err := Newmigrator(from, to, rm.versions, rm.migrations)
-	if err != nil {
-		return err
-	}
-
-	if from.Equal(to) {
-		return nil
-	}
-
-	startTime := time.Now()
-	defer rm.observeRequestLatency(from, to, startTime)
-
-	err = m.applyRequestMigrations(r, handler)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (rm *RequestMigration) migrateResponse(r *http.Request, body []byte, handler string) ([]byte, error) {
-	from, err := rm.getUserVersion(r)
-	if err != nil {
-		return nil, err
-	}
-
-	to := rm.getCurrentVersion()
-	m, err := Newmigrator(from, to, rm.versions, rm.migrations)
-	if err != nil {
-		return nil, err
-	}
-
-	if from.Equal(to) {
-		return body, nil
-	}
-
-	return m.applyResponseMigrations(r, r.Header, body, handler)
-}
-
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
-	var vh string
-	vh = req.Header.Get(rm.opts.VersionHeader)
+	var vh = req.Header.Get(rm.opts.VersionHeader)
 
 	if !isStringEmpty(vh) {
 		return &Version{
@@ -286,139 +178,397 @@ func (rm *RequestMigration) RegisterMetrics(reg *prometheus.Registry) {
 	reg.MustRegister(rm.metric)
 }
 
-func (rm *RequestMigration) writeResponseToClient(w http.ResponseWriter, res *response) error {
-	if res.statusCode != 0 {
-		w.WriteHeader(res.statusCode)
+func (rm *RequestMigration) WithUserVersion(r *http.Request) *RequestMigration {
+	newRM := *rm
+	newRM.request = r
+	return &newRM
+}
+
+func (rm *RequestMigration) Marshal(v interface{}) ([]byte, error) {
+	startTime := time.Now()
+
+	var (
+		err         error
+		userVersion *Version
+	)
+
+	if rm.request != nil {
+		userVersion, err = rm.getUserVersion(rm.request)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		userVersion = rm.getCurrentVersion()
 	}
 
-	_, err := w.Write(res.body)
+	graph, err := rm.buildTypeGraph(reflect.TypeOf(v), userVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	if !graph.HasMigrations() {
+		return json.Marshal(v)
+	}
+
+	currentVersion := rm.getCurrentVersion()
+
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+
+	var intermediate any
+	if err := json.Unmarshal(data, &intermediate); err != nil {
+		return nil, err
+	}
+
+	if err := rm.migrateBackward(graph, &intermediate); err != nil {
+		return nil, err
+	}
+
+	result, err := json.Marshal(intermediate)
+	if err != nil {
+		return nil, err
+	}
+
+	// Observe migration latency: from current version -> to user version (backward migration)
+	rm.observeRequestLatency(currentVersion, userVersion, startTime)
+
+	return result, nil
+}
+
+func (rm *RequestMigration) Unmarshal(data []byte, v interface{}) error {
+	startTime := time.Now()
+
+	var (
+		err         error
+		userVersion *Version
+	)
+
+	if rm.request != nil {
+		userVersion, err = rm.getUserVersion(rm.request)
+		if err != nil {
+			return err
+		}
+	} else {
+		userVersion = rm.getCurrentVersion()
+	}
+
+	t := reflect.TypeOf(v)
+	if t.Kind() != reflect.Ptr {
+		return errors.New("v must be a pointer")
+	}
+
+	graph, err := rm.buildTypeGraph(t, userVersion)
 	if err != nil {
 		return err
 	}
 
-	// TODO(subomi): log bytesWritten
+	if !graph.HasMigrations() {
+		return json.Unmarshal(data, v)
+	}
+
+	currentVersion := rm.getCurrentVersion()
+
+	var intermediate any
+	if err := json.Unmarshal(data, &intermediate); err != nil {
+		return err
+	}
+
+	if err := rm.migrateForward(graph, &intermediate); err != nil {
+		return err
+	}
+
+	data, err = json.Marshal(intermediate)
+	if err != nil {
+		return err
+	}
+
+	if err := json.Unmarshal(data, v); err != nil {
+		return err
+	}
+
+	// Observe migration latency: from user version -> to current version (forward migration)
+	rm.observeRequestLatency(userVersion, currentVersion, startTime)
+
 	return nil
 }
 
-type migrator struct {
-	to         *Version
-	from       *Version
-	versions   []*Version
-	migrations MigrationStore
+// TypeMigration defines how to migrate a specific type
+type TypeMigration interface {
+	// MigrateForward transforms data from old version to new
+	MigrateForward(data any) (any, error)
+
+	// MigrateBackward transforms data from new version to old
+	MigrateBackward(data any) (any, error)
 }
 
-func Newmigrator(from, to *Version, avs []*Version, migrations MigrationStore) (*migrator, error) {
-	if !from.IsValid() || !to.IsValid() {
-		return nil, ErrInvalidVersion
+// MigrationVersion represents all type migrations for a specific version
+type MigrationVersion struct {
+	Version    string
+	Migrations map[reflect.Type]TypeMigration
+}
+
+// TypeGraph represents dependencies between types
+type TypeGraph struct {
+	Type       reflect.Type
+	Fields     map[string]*TypeGraph // field name -> nested type graph
+	Migrations []TypeMigration
+}
+
+func (rm *RequestMigration) buildTypeGraph(t reflect.Type, userVersion *Version) (*TypeGraph, error) {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
 	}
 
-	var versions []*Version
-	for i, v := range avs {
-		if v.Equal(from) {
-			versions = avs[i:]
+	key := graphCacheKey{
+		t:       t,
+		version: userVersion.String(),
+	}
+
+	// 1. Check cache (O(1))
+	rm.cacheMu.RLock()
+	if g, ok := rm.cache[key]; ok {
+		rm.cacheMu.RUnlock()
+		return g, nil
+	}
+	rm.cacheMu.RUnlock()
+
+	// 2. Build graph (DFS with internal cycle detection)
+	rm.cacheMu.Lock()
+	defer rm.cacheMu.Unlock()
+
+	// Re-check cache after acquiring write lock
+	if g, ok := rm.cache[key]; ok {
+		return g, nil
+	}
+
+	g, err := rm.buildTypeGraphRecursive(t, userVersion, make(map[reflect.Type]*TypeGraph))
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Cache the result
+	rm.cache[key] = g
+	return g, nil
+}
+
+func (rm *RequestMigration) buildTypeGraphRecursive(t reflect.Type, userVersion *Version, visited map[reflect.Type]*TypeGraph) (*TypeGraph, error) {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	if g, ok := visited[t]; ok {
+		return g, nil
+	}
+
+	graph := &TypeGraph{
+		Type:   t,
+		Fields: make(map[string]*TypeGraph),
+	}
+	visited[t] = graph
+
+	graph.Migrations = rm.findMigrationsForType(t, userVersion)
+
+	if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		elemGraph, err := rm.buildTypeGraphRecursive(t.Elem(), userVersion, visited)
+		if err != nil {
+			return nil, err
+		}
+
+		if elemGraph.HasMigrations() {
+			graph.Fields["__elem"] = elemGraph
+		}
+	}
+
+	if t.Kind() == reflect.Struct {
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			fieldGraph, err := rm.buildTypeGraphRecursive(field.Type, userVersion, visited)
+			if err != nil {
+				return nil, err
+			}
+
+			if fieldGraph.HasMigrations() {
+				name := field.Name
+				if tag := field.Tag.Get("json"); tag != "" {
+					name = strings.Split(tag, ",")[0]
+				}
+				graph.Fields[name] = fieldGraph
+			}
+		}
+	}
+
+	return graph, nil
+}
+
+func (g *TypeGraph) HasMigrations() bool {
+	if len(g.Migrations) > 0 {
+		return true
+	}
+
+	for _, field := range g.Fields {
+		if field.HasMigrations() {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any) error {
+	val := *data
+	if val == nil {
+		return nil
+	}
+
+	switch v := val.(type) {
+	case map[string]interface{}:
+		for fieldName, fieldGraph := range graph.Fields {
+			if fieldName == "__elem" {
+				continue
+			}
+			fieldData, ok := v[fieldName]
+			if !ok || fieldData == nil {
+				continue
+			}
+			if err := rm.migrateForward(fieldGraph, &fieldData); err != nil {
+				return err
+			}
+			v[fieldName] = fieldData
+		}
+	case []interface{}:
+		elemGraph := graph.Fields["__elem"]
+		if elemGraph != nil {
+			for i := range v {
+				if err := rm.migrateForward(elemGraph, &v[i]); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	for _, m := range graph.Migrations {
+		migratedData, err := m.MigrateForward(*data)
+		if err != nil {
+			return err
+		}
+		*data = migratedData
+	}
+
+	return nil
+}
+
+func (rm *RequestMigration) migrateBackward(graph *TypeGraph, data *any) error {
+	if *data == nil {
+		return nil
+	}
+
+	for i := len(graph.Migrations) - 1; i >= 0; i-- {
+		m := graph.Migrations[i]
+		migratedData, err := m.MigrateBackward(*data)
+		if err != nil {
+			return err
+		}
+		*data = migratedData
+	}
+
+	val := *data
+
+	switch v := val.(type) {
+	case map[string]interface{}:
+		for fieldName, fieldGraph := range graph.Fields {
+			if fieldName == "__elem" {
+				continue
+			}
+			fieldData, ok := v[fieldName]
+			if !ok || fieldData == nil {
+				continue
+			}
+			if err := rm.migrateBackward(fieldGraph, &fieldData); err != nil {
+				return err
+			}
+			v[fieldName] = fieldData
+		}
+	case []interface{}:
+		elemGraph := graph.Fields["__elem"]
+		if elemGraph != nil {
+			for i := range v {
+				if err := rm.migrateBackward(elemGraph, &v[i]); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func Register[T any](rm *RequestMigration, version string, m TypeMigration) error {
+	t := reflect.TypeOf((*T)(nil)).Elem()
+	return rm.registerTypeMigration(version, t, m)
+}
+
+func (rm *RequestMigration) registerTypeMigration(version string, t reflect.Type, m TypeMigration) error {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	if rm.migrations == nil {
+		rm.migrations = make(map[reflect.Type]map[string]TypeMigration)
+	}
+
+	// Check if this version is already known
+	versionKnown := false
+	for _, v := range rm.versions {
+		if v.Value == version {
+			versionKnown = true
 			break
 		}
 	}
 
-	return &migrator{
-		to:         to,
-		from:       from,
-		versions:   versions,
-		migrations: migrations,
-	}, nil
+	if !versionKnown {
+		rm.versions = append(rm.versions, &Version{Format: rm.opts.VersionFormat, Value: version})
+
+		switch rm.opts.VersionFormat {
+		case SemverFormat:
+			sort.Slice(rm.versions, semVerSorter(rm.versions))
+		case DateFormat:
+			sort.Slice(rm.versions, dateVersionSorter(rm.versions))
+		default:
+			return ErrInvalidVersionFormat
+		}
+	}
+
+	// Internal Type-Centric Pivot: map[Type]map[Version]Migration
+	if _, ok := rm.migrations[t]; !ok {
+		rm.migrations[t] = make(map[string]TypeMigration)
+	}
+	rm.migrations[t][version] = m
+
+	return nil
 }
 
-func (m *migrator) applyRequestMigrations(req *http.Request, handler string) error {
-	if m.versions == nil {
+func (rm *RequestMigration) findMigrationsForType(t reflect.Type, userVersion *Version) []TypeMigration {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	var applicableMigrations []TypeMigration
+
+	typeHistory, ok := rm.migrations[t]
+	if !ok {
 		return nil
 	}
 
-	data, err := io.ReadAll(req.Body)
-	if err != nil {
-		return err
-	}
-
-	header := req.Header.Clone()
-
-	for _, version := range m.versions {
-		migrations, ok := m.migrations[version.String()]
-		if !ok {
-			return ErrInvalidVersion
-		}
-
-		// skip initial version.
-		if m.from.Equal(version) {
+	// rm.versions is sorted oldest to newest.
+	for _, v := range rm.versions {
+		if v.Equal(userVersion) || v.isOlderThan(userVersion) {
 			continue
 		}
 
-		migration := m.retrieveHandlerRequestMigration(migrations, handler)
-		if migration != nil {
-			data, header, err = migration.Migrate(data, header)
-			if err != nil {
-				return err
-			}
+		if migration, ok := typeHistory[v.String()]; ok {
+			applicableMigrations = append(applicableMigrations, migration)
 		}
 	}
 
-	req.Header = header
-
-	// set the body back for the rest of the middleware.
-	req.Body = io.NopCloser(bytes.NewReader(data))
-
-	return nil
-}
-
-func (m *migrator) applyResponseMigrations(r *http.Request, header http.Header, data []byte, handler string) ([]byte, error) {
-	var err error
-
-	for i := len(m.versions); i > 0; i-- {
-		version := m.versions[i-1]
-		migrations, ok := m.migrations[version.String()]
-		if !ok {
-			return nil, ErrServerError
-		}
-
-		// skip initial version.
-		if m.from.Equal(version) {
-			return data, nil
-		}
-
-		migration := m.retrieveHandlerResponseMigration(migrations, handler)
-		if migration != nil {
-			data, _, err = migration.Migrate(data, header)
-			if err != nil {
-				return nil, ErrServerError
-			}
-		}
-
-	}
-
-	return data, nil
-}
-
-func (m *migrator) retrieveHandlerResponseMigration(migrations Migrations, handler string) Migration {
-	return m.retrieveHandlerMigration(migrations, strings.Join([]string{handler, "response"}, ""))
-}
-
-func (m *migrator) retrieveHandlerRequestMigration(migrations Migrations, handler string) Migration {
-	return m.retrieveHandlerMigration(migrations, strings.Join([]string{handler, "request"}, ""))
-}
-
-func (m *migrator) retrieveHandlerMigration(migrations Migrations, handler string) Migration {
-	for _, migration := range migrations {
-		var mv reflect.Value
-
-		mv = reflect.ValueOf(migration)
-
-		if mv.Kind() == reflect.Ptr {
-			mv = mv.Elem()
-		}
-
-		fName := strings.ToLower(mv.Type().Name())
-		if strings.HasPrefix(fName, strings.ToLower(handler)) {
-			return migration
-		}
-	}
-
-	return nil
+	return applicableMigrations
 }
