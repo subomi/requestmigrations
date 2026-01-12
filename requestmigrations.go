@@ -33,7 +33,7 @@ type GetUserVersionFunc func(req *http.Request) (string, error)
 type RequestMigrationOptions struct {
 	// VersionHeader refers to the header value used to retrieve the request's
 	// version. If VersionHeader is empty, we call the GetUserVersionFunc to
-	// retrive the user's version.
+	// retrieve the user's version.
 	VersionHeader string
 
 	// CurrentVersion refers to the API's most recent version. This value should
@@ -76,9 +76,10 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 	}, []string{"from", "to"})
 
 	var iv string
-	if opts.VersionFormat == DateFormat {
+	switch opts.VersionFormat {
+	case DateFormat:
 		iv = new(time.Time).Format(time.DateOnly)
-	} else if opts.VersionFormat == SemverFormat {
+	case SemverFormat:
 		iv = "v0"
 	}
 
@@ -94,8 +95,7 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 }
 
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
-	var vh string
-	vh = req.Header.Get(rm.opts.VersionHeader)
+	var vh string = req.Header.Get(rm.opts.VersionHeader)
 
 	if !isStringEmpty(vh) {
 		return &Version{
