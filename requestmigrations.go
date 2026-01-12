@@ -57,8 +57,18 @@ type RequestMigration struct {
 	metric   *prometheus.HistogramVec
 	iv       string
 
-	mu         sync.Mutex
-	migrations map[string]map[reflect.Type]TypeMigration // version -> type -> migration
+	mu         *sync.Mutex
+	migrations map[reflect.Type]map[string]TypeMigration // type -> version -> migration
+
+	cacheMu *sync.RWMutex
+	cache   map[graphCacheKey]*TypeGraph
+
+	request *http.Request // context for a specific request
+}
+
+type graphCacheKey struct {
+	t       reflect.Type
+	version string
 }
 
 func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, error) {
@@ -83,19 +93,23 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 		iv = "v0"
 	}
 
-	var versions []*Version
+	versions := make([]*Version, 0, 1)
 	versions = append(versions, &Version{Format: opts.VersionFormat, Value: iv})
 
 	return &RequestMigration{
-		opts:     opts,
-		metric:   me,
-		iv:       iv,
-		versions: versions,
+		opts:       opts,
+		metric:     me,
+		iv:         iv,
+		versions:   versions,
+		mu:         new(sync.Mutex),
+		migrations: make(map[reflect.Type]map[string]TypeMigration),
+		cacheMu:    new(sync.RWMutex),
+		cache:      make(map[graphCacheKey]*TypeGraph),
 	}, nil
 }
 
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
-	var vh string = req.Header.Get(rm.opts.VersionHeader)
+	var vh = req.Header.Get(rm.opts.VersionHeader)
 
 	if !isStringEmpty(vh) {
 		return &Version{
@@ -164,40 +178,30 @@ func (rm *RequestMigration) RegisterMetrics(reg *prometheus.Registry) {
 	reg.MustRegister(rm.metric)
 }
 
-func (rm *RequestMigration) writeResponseToClient(w http.ResponseWriter, res *response) error {
-	if res.statusCode != 0 {
-		w.WriteHeader(res.statusCode)
-	}
-
-	_, err := w.Write(res.body)
-	if err != nil {
-		return err
-	}
-
-	// TODO(subomi): log bytesWritten
-	return nil
+func (rm *RequestMigration) WithUserVersion(r *http.Request) *RequestMigration {
+	newRM := *rm
+	newRM.request = r
+	return &newRM
 }
 
-// VersionedRequestMigration is a wrapper that holds context for a specific request
-type VersionedRequestMigration struct {
-	rm      *RequestMigration
-	request *http.Request // needed to extract user version
-}
+func (rm *RequestMigration) Marshal(v interface{}) ([]byte, error) {
+	startTime := time.Now()
 
-func (rm *RequestMigration) WithUserVersion(r *http.Request) *VersionedRequestMigration {
-	return &VersionedRequestMigration{
-		rm:      rm,
-		request: r,
-	}
-}
+	var (
+		err         error
+		userVersion *Version
+	)
 
-func (vrm *VersionedRequestMigration) Marshal(v interface{}) ([]byte, error) {
-	userVersion, err := vrm.rm.getUserVersion(vrm.request)
-	if err != nil {
-		return nil, err
+	if rm.request != nil {
+		userVersion, err = rm.getUserVersion(rm.request)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		userVersion = rm.getCurrentVersion()
 	}
 
-	graph, err := vrm.rm.buildTypeGraph(reflect.TypeOf(v), userVersion)
+	graph, err := rm.buildTypeGraph(reflect.TypeOf(v), userVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +209,8 @@ func (vrm *VersionedRequestMigration) Marshal(v interface{}) ([]byte, error) {
 	if !graph.HasMigrations() {
 		return json.Marshal(v)
 	}
+
+	currentVersion := rm.getCurrentVersion()
 
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -216,17 +222,36 @@ func (vrm *VersionedRequestMigration) Marshal(v interface{}) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := vrm.rm.migrateBackward(graph, &intermediate, userVersion); err != nil {
+	if err := rm.migrateBackward(graph, &intermediate); err != nil {
 		return nil, err
 	}
 
-	return json.Marshal(intermediate)
+	result, err := json.Marshal(intermediate)
+	if err != nil {
+		return nil, err
+	}
+
+	// Observe migration latency: from current version -> to user version (backward migration)
+	rm.observeRequestLatency(currentVersion, userVersion, startTime)
+
+	return result, nil
 }
 
-func (vrm *VersionedRequestMigration) Unmarshal(data []byte, v interface{}) error {
-	userVersion, err := vrm.rm.getUserVersion(vrm.request)
-	if err != nil {
-		return err
+func (rm *RequestMigration) Unmarshal(data []byte, v interface{}) error {
+	startTime := time.Now()
+
+	var (
+		err         error
+		userVersion *Version
+	)
+
+	if rm.request != nil {
+		userVersion, err = rm.getUserVersion(rm.request)
+		if err != nil {
+			return err
+		}
+	} else {
+		userVersion = rm.getCurrentVersion()
 	}
 
 	t := reflect.TypeOf(v)
@@ -234,7 +259,7 @@ func (vrm *VersionedRequestMigration) Unmarshal(data []byte, v interface{}) erro
 		return errors.New("v must be a pointer")
 	}
 
-	graph, err := vrm.rm.buildTypeGraph(t, userVersion)
+	graph, err := rm.buildTypeGraph(t, userVersion)
 	if err != nil {
 		return err
 	}
@@ -243,12 +268,14 @@ func (vrm *VersionedRequestMigration) Unmarshal(data []byte, v interface{}) erro
 		return json.Unmarshal(data, v)
 	}
 
+	currentVersion := rm.getCurrentVersion()
+
 	var intermediate any
 	if err := json.Unmarshal(data, &intermediate); err != nil {
 		return err
 	}
 
-	if err := vrm.rm.migrateForward(graph, &intermediate, userVersion); err != nil {
+	if err := rm.migrateForward(graph, &intermediate); err != nil {
 		return err
 	}
 
@@ -257,7 +284,14 @@ func (vrm *VersionedRequestMigration) Unmarshal(data []byte, v interface{}) erro
 		return err
 	}
 
-	return json.Unmarshal(data, v)
+	if err := json.Unmarshal(data, v); err != nil {
+		return err
+	}
+
+	// Observe migration latency: from user version -> to current version (forward migration)
+	rm.observeRequestLatency(userVersion, currentVersion, startTime)
+
+	return nil
 }
 
 // TypeMigration defines how to migrate a specific type
@@ -283,7 +317,40 @@ type TypeGraph struct {
 }
 
 func (rm *RequestMigration) buildTypeGraph(t reflect.Type, userVersion *Version) (*TypeGraph, error) {
-	return rm.buildTypeGraphRecursive(t, userVersion, make(map[reflect.Type]*TypeGraph))
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	key := graphCacheKey{
+		t:       t,
+		version: userVersion.String(),
+	}
+
+	// 1. Check cache (O(1))
+	rm.cacheMu.RLock()
+	if g, ok := rm.cache[key]; ok {
+		rm.cacheMu.RUnlock()
+		return g, nil
+	}
+	rm.cacheMu.RUnlock()
+
+	// 2. Build graph (DFS with internal cycle detection)
+	rm.cacheMu.Lock()
+	defer rm.cacheMu.Unlock()
+
+	// Re-check cache after acquiring write lock
+	if g, ok := rm.cache[key]; ok {
+		return g, nil
+	}
+
+	g, err := rm.buildTypeGraphRecursive(t, userVersion, make(map[reflect.Type]*TypeGraph))
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Cache the result
+	rm.cache[key] = g
+	return g, nil
 }
 
 func (rm *RequestMigration) buildTypeGraphRecursive(t reflect.Type, userVersion *Version, visited map[reflect.Type]*TypeGraph) (*TypeGraph, error) {
@@ -349,7 +416,7 @@ func (g *TypeGraph) HasMigrations() bool {
 	return false
 }
 
-func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any, fromVersion *Version) error {
+func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any) error {
 	val := *data
 	if val == nil {
 		return nil
@@ -365,7 +432,7 @@ func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any, fromVers
 			if !ok || fieldData == nil {
 				continue
 			}
-			if err := rm.migrateForward(fieldGraph, &fieldData, fromVersion); err != nil {
+			if err := rm.migrateForward(fieldGraph, &fieldData); err != nil {
 				return err
 			}
 			v[fieldName] = fieldData
@@ -374,7 +441,7 @@ func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any, fromVers
 		elemGraph := graph.Fields["__elem"]
 		if elemGraph != nil {
 			for i := range v {
-				if err := rm.migrateForward(elemGraph, &v[i], fromVersion); err != nil {
+				if err := rm.migrateForward(elemGraph, &v[i]); err != nil {
 					return err
 				}
 			}
@@ -392,7 +459,7 @@ func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any, fromVers
 	return nil
 }
 
-func (rm *RequestMigration) migrateBackward(graph *TypeGraph, data *any, toVersion *Version) error {
+func (rm *RequestMigration) migrateBackward(graph *TypeGraph, data *any) error {
 	if *data == nil {
 		return nil
 	}
@@ -418,7 +485,7 @@ func (rm *RequestMigration) migrateBackward(graph *TypeGraph, data *any, toVersi
 			if !ok || fieldData == nil {
 				continue
 			}
-			if err := rm.migrateBackward(fieldGraph, &fieldData, toVersion); err != nil {
+			if err := rm.migrateBackward(fieldGraph, &fieldData); err != nil {
 				return err
 			}
 			v[fieldName] = fieldData
@@ -427,7 +494,7 @@ func (rm *RequestMigration) migrateBackward(graph *TypeGraph, data *any, toVersi
 		elemGraph := graph.Fields["__elem"]
 		if elemGraph != nil {
 			for i := range v {
-				if err := rm.migrateBackward(elemGraph, &v[i], toVersion); err != nil {
+				if err := rm.migrateBackward(elemGraph, &v[i]); err != nil {
 					return err
 				}
 			}
@@ -447,11 +514,19 @@ func (rm *RequestMigration) registerTypeMigration(version string, t reflect.Type
 	defer rm.mu.Unlock()
 
 	if rm.migrations == nil {
-		rm.migrations = make(map[string]map[reflect.Type]TypeMigration)
+		rm.migrations = make(map[reflect.Type]map[string]TypeMigration)
 	}
 
-	if _, ok := rm.migrations[version]; !ok {
-		rm.migrations[version] = make(map[reflect.Type]TypeMigration)
+	// Check if this version is already known
+	versionKnown := false
+	for _, v := range rm.versions {
+		if v.Value == version {
+			versionKnown = true
+			break
+		}
+	}
+
+	if !versionKnown {
 		rm.versions = append(rm.versions, &Version{Format: rm.opts.VersionFormat, Value: version})
 
 		switch rm.opts.VersionFormat {
@@ -464,7 +539,12 @@ func (rm *RequestMigration) registerTypeMigration(version string, t reflect.Type
 		}
 	}
 
-	rm.migrations[version][t] = m
+	// Internal Type-Centric Pivot: map[Type]map[Version]Migration
+	if _, ok := rm.migrations[t]; !ok {
+		rm.migrations[t] = make(map[string]TypeMigration)
+	}
+	rm.migrations[t][version] = m
+
 	return nil
 }
 
@@ -474,17 +554,18 @@ func (rm *RequestMigration) findMigrationsForType(t reflect.Type, userVersion *V
 
 	var applicableMigrations []TypeMigration
 
+	typeHistory, ok := rm.migrations[t]
+	if !ok {
+		return nil
+	}
+
+	// rm.versions is sorted oldest to newest.
 	for _, v := range rm.versions {
 		if v.Equal(userVersion) || v.isOlderThan(userVersion) {
 			continue
 		}
 
-		typeMigrations, ok := rm.migrations[v.String()]
-		if !ok {
-			continue
-		}
-
-		if migration, ok := typeMigrations[t]; ok {
+		if migration, ok := typeHistory[v.String()]; ok {
 			applicableMigrations = append(applicableMigrations, migration)
 		}
 	}

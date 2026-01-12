@@ -1,4 +1,4 @@
-module github.com/subomi/requestmigrations
+module github.com/subomi/requestmigrations/v2
 
 go 1.24
 

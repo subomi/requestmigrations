@@ -1,131 +1,66 @@
 package main
 
 import (
-	"basicexample/helper"
-	"encoding/json"
-	"net/http"
-	"net/url"
 	"strings"
-	"time"
 )
 
-// Migrations
-type ListUserResponseMigration struct{}
+// UserMigration handles migrations for the User type
+type UserMigration struct{}
 
-func (c *ListUserResponseMigration) ShouldMigrateConstraint(
-	url *url.URL,
-	method string,
-	data []byte,
-	isReq bool) bool {
+func (m *UserMigration) MigrateForward(data any) (any, error) {
+	d, ok := data.(map[string]any)
+	if !ok {
+		return data, nil
+	}
 
-	isUserPath := url.Path == "/users"
-	isGetMethod := method == http.MethodGet
-	isValidType := isReq == false
+	// If we have full_name but no first_name/last_name, split it
+	if fullName, ok := d["full_name"].(string); ok {
+		parts := strings.Split(fullName, " ")
+		if len(parts) > 0 {
+			d["first_name"] = parts[0]
+		}
+		if len(parts) > 1 {
+			d["last_name"] = parts[1]
+		}
+		delete(d, "full_name")
+	}
 
-	return isUserPath && isGetMethod && isValidType
+	return d, nil
 }
 
-func (c *ListUserResponseMigration) Migrate(
-	body []byte,
-	h http.Header) ([]byte, http.Header, error) {
-	type oldUser struct {
-		UID       string    `json:"uid"`
-		Email     string    `json:"email"`
-		FullName  string    `json:"full_name"`
-		Profile   string    `json:"profile"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
+func (m *UserMigration) MigrateBackward(data any) (any, error) {
+	d, ok := data.(map[string]any)
+	if !ok {
+		return data, nil
 	}
 
-	var res helper.ServerResponse
-	err := json.Unmarshal(body, &res)
-	if err != nil {
-		return nil, nil, err
-	}
+	// Join first_name and last_name into full_name for older versions
+	firstName, _ := d["first_name"].(string)
+	lastName, _ := d["last_name"].(string)
+	d["full_name"] = strings.TrimSpace(firstName + " " + lastName)
 
-	var users []*oldUser20230501
-	err = json.Unmarshal(res.Data, &users)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var newUsers []*oldUser
-	for _, u := range users {
-		var oldUser oldUser
-		oldUser.UID = u.UID
-		oldUser.Email = u.Email
-		oldUser.FullName = strings.Join([]string{u.FirstName, u.LastName}, " ")
-		oldUser.Profile = u.Profile
-		oldUser.CreatedAt = u.CreatedAt
-		oldUser.UpdatedAt = u.UpdatedAt
-		newUsers = append(newUsers, &oldUser)
-	}
-
-	body, err = helper.GenerateSuccessResponse(&newUsers, "users retrieved successfully")
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return body, h, nil
+	return d, nil
 }
 
-type oldUser20230501 struct {
-	UID       string    `json:"uid"`
-	Email     string    `json:"email"`
-	FirstName string    `json:"first_name"`
-	LastName  string    `json:"last_name"`
-	Profile   string    `json:"profile"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+// ProfileMigration handles migrations for the profile type if needed
+type ProfileMigration struct{}
+
+func (m *ProfileMigration) MigrateForward(data any) (any, error) {
+	// If it's just a string (old format), we can't fully reconstruct the profile
+	// but we can at least put the UID in.
+	if uid, ok := data.(string); ok {
+		return map[string]any{
+			"uid": uid,
+		}, nil
+	}
+	return data, nil
 }
 
-type expandProfileForUserMigration struct{}
-
-func (e *expandProfileForUserMigration) ShouldMigrateConstraint(
-	url *url.URL,
-	method string,
-	body []byte,
-	isReq bool) bool {
-
-	isUserPath := url.Path == "/users"
-	isGetMethod := method == http.MethodGet
-	isValidType := isReq == false
-
-	return isUserPath && isGetMethod && isValidType
-}
-
-func (e *expandProfileForUserMigration) Migrate(
-	body []byte,
-	h http.Header) ([]byte, http.Header, error) {
-	var res helper.ServerResponse
-	err := json.Unmarshal(body, &res)
-	if err != nil {
-		return nil, nil, err
+func (m *ProfileMigration) MigrateBackward(data any) (any, error) {
+	d, ok := data.(map[string]any)
+	if !ok {
+		return data, nil
 	}
-
-	var users []*User
-	err = json.Unmarshal(res.Data, &users)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var newUsers []*oldUser20230501
-	for _, u := range users {
-		var oldUser oldUser20230501
-		oldUser.UID = u.UID
-		oldUser.Email = u.Email
-		oldUser.FirstName = u.FirstName
-		oldUser.LastName = u.LastName
-		oldUser.Profile = u.Profile.UID
-		oldUser.CreatedAt = u.CreatedAt
-		oldUser.UpdatedAt = u.UpdatedAt
-		newUsers = append(newUsers, &oldUser)
-	}
-
-	body, err = helper.GenerateSuccessResponse(&newUsers, "users retrieved successfully")
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return body, h, nil
+	// In older versions, profile was just the UID string
+	return d["uid"], nil
 }
