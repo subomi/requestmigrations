@@ -81,8 +81,13 @@ func (a *API) ListUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use the new API to marshal and migrate the users
-	data, err := a.rm.WithUserVersion(r).Marshal(users)
+	migrator, err := a.rm.For(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	data, err := migrator.Marshal(users)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -106,8 +111,13 @@ func (a *API) GetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use the new API to marshal and migrate the user
-	data, err := a.rm.WithUserVersion(r).Marshal(user)
+	migrator, err := a.rm.For(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	data, err := migrator.Marshal(user)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

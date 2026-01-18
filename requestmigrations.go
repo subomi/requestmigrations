@@ -1,6 +1,7 @@
 package requestmigrations
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +13,20 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+type userVersionKey struct{}
+
+// UserVersionFromContext retrieves the user's API version from a migration context.
+func UserVersionFromContext(ctx context.Context) *Version {
+	if v, ok := ctx.Value(userVersionKey{}).(*Version); ok {
+		return v
+	}
+	return nil
+}
+
+func withUserVersion(ctx context.Context, version *Version) context.Context {
+	return context.WithValue(ctx, userVersionKey{}, version)
+}
 
 type VersionFormat string
 
@@ -60,10 +75,14 @@ type RequestMigration struct {
 	mu         *sync.Mutex
 	migrations map[reflect.Type]map[string]TypeMigration // type -> version -> migration
 
-	cacheMu *sync.RWMutex
-	cache   map[graphCacheKey]*TypeGraph
+	graphBuilder *TypeGraphBuilder
+}
 
-	request *http.Request // context for a specific request
+// Migrator is a request-scoped handle for performing migrations.
+type Migrator struct {
+	rm          *RequestMigration
+	ctx         context.Context
+	userVersion *Version
 }
 
 type graphCacheKey struct {
@@ -96,16 +115,18 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 	versions := make([]*Version, 0, 1)
 	versions = append(versions, &Version{Format: opts.VersionFormat, Value: iv})
 
-	return &RequestMigration{
+	rm := &RequestMigration{
 		opts:       opts,
 		metric:     me,
 		iv:         iv,
 		versions:   versions,
 		mu:         new(sync.Mutex),
 		migrations: make(map[reflect.Type]map[string]TypeMigration),
-		cacheMu:    new(sync.RWMutex),
-		cache:      make(map[graphCacheKey]*TypeGraph),
-	}, nil
+	}
+
+	rm.graphBuilder = NewTypeGraphBuilder(rm)
+
+	return rm, nil
 }
 
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
@@ -178,30 +199,36 @@ func (rm *RequestMigration) RegisterMetrics(reg *prometheus.Registry) {
 	reg.MustRegister(rm.metric)
 }
 
-func (rm *RequestMigration) WithUserVersion(r *http.Request) *RequestMigration {
-	newRM := *rm
-	newRM.request = r
-	return &newRM
-}
-
-func (rm *RequestMigration) Marshal(v interface{}) ([]byte, error) {
-	startTime := time.Now()
-
-	var (
-		err         error
-		userVersion *Version
-	)
-
-	if rm.request != nil {
-		userVersion, err = rm.getUserVersion(rm.request)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		userVersion = rm.getCurrentVersion()
+// For creates a request-scoped Migrator for performing migrations.
+func (rm *RequestMigration) For(r *http.Request) (*Migrator, error) {
+	if r == nil {
+		return nil, errors.New("request cannot be nil")
 	}
 
-	graph, err := rm.buildTypeGraph(reflect.TypeOf(v), userVersion)
+	userVersion, err := rm.getUserVersion(r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use request's context directly, only add user version
+	ctx := withUserVersion(r.Context(), userVersion)
+
+	return &Migrator{
+		rm:          rm,
+		ctx:         ctx,
+		userVersion: userVersion,
+	}, nil
+}
+
+// Bind is an alias for For.
+func (rm *RequestMigration) Bind(r *http.Request) (*Migrator, error) {
+	return rm.For(r)
+}
+
+func (m *Migrator) Marshal(v interface{}) ([]byte, error) {
+	startTime := time.Now()
+
+	graph, err := m.rm.graphBuilder.BuildFromValue(reflect.ValueOf(v), m.userVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +237,7 @@ func (rm *RequestMigration) Marshal(v interface{}) ([]byte, error) {
 		return json.Marshal(v)
 	}
 
-	currentVersion := rm.getCurrentVersion()
+	currentVersion := m.rm.getCurrentVersion()
 
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -222,7 +249,7 @@ func (rm *RequestMigration) Marshal(v interface{}) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := rm.migrateBackward(graph, &intermediate); err != nil {
+	if err := graph.MigrateBackward(m.ctx, &intermediate); err != nil {
 		return nil, err
 	}
 
@@ -232,34 +259,20 @@ func (rm *RequestMigration) Marshal(v interface{}) ([]byte, error) {
 	}
 
 	// Observe migration latency: from current version -> to user version (backward migration)
-	rm.observeRequestLatency(currentVersion, userVersion, startTime)
+	m.rm.observeRequestLatency(currentVersion, m.userVersion, startTime)
 
 	return result, nil
 }
 
-func (rm *RequestMigration) Unmarshal(data []byte, v interface{}) error {
+func (m *Migrator) Unmarshal(data []byte, v interface{}) error {
 	startTime := time.Now()
-
-	var (
-		err         error
-		userVersion *Version
-	)
-
-	if rm.request != nil {
-		userVersion, err = rm.getUserVersion(rm.request)
-		if err != nil {
-			return err
-		}
-	} else {
-		userVersion = rm.getCurrentVersion()
-	}
 
 	t := reflect.TypeOf(v)
 	if t.Kind() != reflect.Ptr {
 		return errors.New("v must be a pointer")
 	}
 
-	graph, err := rm.buildTypeGraph(t, userVersion)
+	graph, err := m.rm.graphBuilder.Build(t, m.userVersion)
 	if err != nil {
 		return err
 	}
@@ -268,14 +281,14 @@ func (rm *RequestMigration) Unmarshal(data []byte, v interface{}) error {
 		return json.Unmarshal(data, v)
 	}
 
-	currentVersion := rm.getCurrentVersion()
+	currentVersion := m.rm.getCurrentVersion()
 
 	var intermediate any
 	if err := json.Unmarshal(data, &intermediate); err != nil {
 		return err
 	}
 
-	if err := rm.migrateForward(graph, &intermediate); err != nil {
+	if err := graph.MigrateForward(m.ctx, &intermediate); err != nil {
 		return err
 	}
 
@@ -289,7 +302,7 @@ func (rm *RequestMigration) Unmarshal(data []byte, v interface{}) error {
 	}
 
 	// Observe migration latency: from user version -> to current version (forward migration)
-	rm.observeRequestLatency(userVersion, currentVersion, startTime)
+	m.rm.observeRequestLatency(m.userVersion, currentVersion, startTime)
 
 	return nil
 }
@@ -297,10 +310,10 @@ func (rm *RequestMigration) Unmarshal(data []byte, v interface{}) error {
 // TypeMigration defines how to migrate a specific type
 type TypeMigration interface {
 	// MigrateForward transforms data from old version to new
-	MigrateForward(data any) (any, error)
+	MigrateForward(ctx context.Context, data any) (any, error)
 
 	// MigrateBackward transforms data from new version to old
-	MigrateBackward(data any) (any, error)
+	MigrateBackward(ctx context.Context, data any) (any, error)
 }
 
 // MigrationVersion represents all type migrations for a specific version
@@ -316,10 +329,29 @@ type TypeGraph struct {
 	Migrations []TypeMigration
 }
 
-func (rm *RequestMigration) buildTypeGraph(t reflect.Type, userVersion *Version) (*TypeGraph, error) {
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
+// MigrationFinder abstracts the lookup of migrations for a given type and version
+type MigrationFinder interface {
+	FindMigrationsForType(t reflect.Type, version *Version) []TypeMigration
+}
+
+// TypeGraphBuilder handles the construction of TypeGraph instances
+type TypeGraphBuilder struct {
+	finder  MigrationFinder
+	cacheMu *sync.RWMutex
+	cache   map[graphCacheKey]*TypeGraph
+}
+
+// NewTypeGraphBuilder creates a new TypeGraphBuilder with the given migration finder
+func NewTypeGraphBuilder(finder MigrationFinder) *TypeGraphBuilder {
+	return &TypeGraphBuilder{
+		finder:  finder,
+		cacheMu: new(sync.RWMutex),
+		cache:   make(map[graphCacheKey]*TypeGraph),
 	}
+}
+
+func (b *TypeGraphBuilder) Build(t reflect.Type, userVersion *Version) (*TypeGraph, error) {
+	t = dereferenceToLastPtr(t)
 
 	key := graphCacheKey{
 		t:       t,
@@ -327,33 +359,33 @@ func (rm *RequestMigration) buildTypeGraph(t reflect.Type, userVersion *Version)
 	}
 
 	// 1. Check cache (O(1))
-	rm.cacheMu.RLock()
-	if g, ok := rm.cache[key]; ok {
-		rm.cacheMu.RUnlock()
+	b.cacheMu.RLock()
+	if g, ok := b.cache[key]; ok {
+		b.cacheMu.RUnlock()
 		return g, nil
 	}
-	rm.cacheMu.RUnlock()
+	b.cacheMu.RUnlock()
 
 	// 2. Build graph (DFS with internal cycle detection)
-	rm.cacheMu.Lock()
-	defer rm.cacheMu.Unlock()
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
 
 	// Re-check cache after acquiring write lock
-	if g, ok := rm.cache[key]; ok {
+	if g, ok := b.cache[key]; ok {
 		return g, nil
 	}
 
-	g, err := rm.buildTypeGraphRecursive(t, userVersion, make(map[reflect.Type]*TypeGraph))
+	g, err := b.buildRecursive(t, userVersion, make(map[reflect.Type]*TypeGraph))
 	if err != nil {
 		return nil, err
 	}
 
 	// 3. Cache the result
-	rm.cache[key] = g
+	b.cache[key] = g
 	return g, nil
 }
 
-func (rm *RequestMigration) buildTypeGraphRecursive(t reflect.Type, userVersion *Version, visited map[reflect.Type]*TypeGraph) (*TypeGraph, error) {
+func (b *TypeGraphBuilder) buildRecursive(t reflect.Type, userVersion *Version, visited map[reflect.Type]*TypeGraph) (*TypeGraph, error) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
@@ -368,10 +400,10 @@ func (rm *RequestMigration) buildTypeGraphRecursive(t reflect.Type, userVersion 
 	}
 	visited[t] = graph
 
-	graph.Migrations = rm.findMigrationsForType(t, userVersion)
+	graph.Migrations = b.finder.FindMigrationsForType(t, userVersion)
 
 	if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
-		elemGraph, err := rm.buildTypeGraphRecursive(t.Elem(), userVersion, visited)
+		elemGraph, err := b.buildRecursive(t.Elem(), userVersion, visited)
 		if err != nil {
 			return nil, err
 		}
@@ -384,7 +416,93 @@ func (rm *RequestMigration) buildTypeGraphRecursive(t reflect.Type, userVersion 
 	if t.Kind() == reflect.Struct {
 		for i := 0; i < t.NumField(); i++ {
 			field := t.Field(i)
-			fieldGraph, err := rm.buildTypeGraphRecursive(field.Type, userVersion, visited)
+			fieldGraph, err := b.buildRecursive(field.Type, userVersion, visited)
+			if err != nil {
+				return nil, err
+			}
+
+			if fieldGraph.HasMigrations() {
+				name := field.Name
+				if tag := field.Tag.Get("json"); tag != "" {
+					name = strings.Split(tag, ",")[0]
+				}
+				graph.Fields[name] = fieldGraph
+			}
+		}
+	}
+
+	return graph, nil
+}
+
+// BuildFromValue builds a type graph from a value, enabling runtime type detection for interface{} fields.
+func (b *TypeGraphBuilder) BuildFromValue(v reflect.Value, userVersion *Version) (*TypeGraph, error) {
+	return b.buildFromValueRecursive(v, userVersion, make(map[uintptr]bool))
+}
+
+func (b *TypeGraphBuilder) buildFromValueRecursive(v reflect.Value, userVersion *Version, visited map[uintptr]bool) (*TypeGraph, error) {
+	for v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return &TypeGraph{Fields: make(map[string]*TypeGraph)}, nil
+		}
+		v = v.Elem()
+	}
+
+	if v.Kind() == reflect.Struct && v.CanAddr() {
+		addr := v.UnsafeAddr()
+		if visited[addr] {
+			return &TypeGraph{Fields: make(map[string]*TypeGraph)}, nil
+		}
+		visited[addr] = true
+	}
+
+	t := v.Type()
+
+	graph := &TypeGraph{
+		Type:   t,
+		Fields: make(map[string]*TypeGraph),
+	}
+
+	graph.Migrations = b.finder.FindMigrationsForType(t, userVersion)
+
+	if v.Kind() == reflect.Slice || v.Kind() == reflect.Array {
+		if v.Len() > 0 {
+			elemValue := v.Index(0)
+			if elemValue.Kind() == reflect.Interface && !elemValue.IsNil() {
+				elemValue = elemValue.Elem()
+			}
+
+			elemGraph, err := b.buildFromValueRecursive(elemValue, userVersion, visited)
+			if err != nil {
+				return nil, err
+			}
+			if elemGraph.HasMigrations() {
+				graph.Fields["__elem"] = elemGraph
+			}
+		}
+	}
+
+	if v.Kind() == reflect.Struct {
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			fieldValue := v.Field(i)
+
+			if !fieldValue.CanInterface() {
+				continue
+			}
+
+			var fieldGraph *TypeGraph
+			var err error
+
+			if field.Type.Kind() == reflect.Interface {
+				if fieldValue.IsNil() {
+					continue
+				}
+				actualValue := fieldValue.Elem()
+				fieldGraph, err = b.buildFromValueRecursive(actualValue, userVersion, visited)
+			} else {
+				fieldGraph, err = b.buildFromValueRecursive(fieldValue, userVersion, visited)
+			}
+
 			if err != nil {
 				return nil, err
 			}
@@ -416,7 +534,8 @@ func (g *TypeGraph) HasMigrations() bool {
 	return false
 }
 
-func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any) error {
+// MigrateForward applies forward migrations (old version -> new version) to the data
+func (g *TypeGraph) MigrateForward(ctx context.Context, data *any) error {
 	val := *data
 	if val == nil {
 		return nil
@@ -424,7 +543,7 @@ func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any) error {
 
 	switch v := val.(type) {
 	case map[string]interface{}:
-		for fieldName, fieldGraph := range graph.Fields {
+		for fieldName, fieldGraph := range g.Fields {
 			if fieldName == "__elem" {
 				continue
 			}
@@ -432,24 +551,24 @@ func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any) error {
 			if !ok || fieldData == nil {
 				continue
 			}
-			if err := rm.migrateForward(fieldGraph, &fieldData); err != nil {
+			if err := fieldGraph.MigrateForward(ctx, &fieldData); err != nil {
 				return err
 			}
 			v[fieldName] = fieldData
 		}
 	case []interface{}:
-		elemGraph := graph.Fields["__elem"]
+		elemGraph := g.Fields["__elem"]
 		if elemGraph != nil {
 			for i := range v {
-				if err := rm.migrateForward(elemGraph, &v[i]); err != nil {
+				if err := elemGraph.MigrateForward(ctx, &v[i]); err != nil {
 					return err
 				}
 			}
 		}
 	}
 
-	for _, m := range graph.Migrations {
-		migratedData, err := m.MigrateForward(*data)
+	for _, m := range g.Migrations {
+		migratedData, err := m.MigrateForward(ctx, *data)
 		if err != nil {
 			return err
 		}
@@ -459,14 +578,15 @@ func (rm *RequestMigration) migrateForward(graph *TypeGraph, data *any) error {
 	return nil
 }
 
-func (rm *RequestMigration) migrateBackward(graph *TypeGraph, data *any) error {
+// MigrateBackward applies backward migrations (new version -> old version) to the data
+func (g *TypeGraph) MigrateBackward(ctx context.Context, data *any) error {
 	if *data == nil {
 		return nil
 	}
 
-	for i := len(graph.Migrations) - 1; i >= 0; i-- {
-		m := graph.Migrations[i]
-		migratedData, err := m.MigrateBackward(*data)
+	for i := len(g.Migrations) - 1; i >= 0; i-- {
+		m := g.Migrations[i]
+		migratedData, err := m.MigrateBackward(ctx, *data)
 		if err != nil {
 			return err
 		}
@@ -477,7 +597,7 @@ func (rm *RequestMigration) migrateBackward(graph *TypeGraph, data *any) error {
 
 	switch v := val.(type) {
 	case map[string]interface{}:
-		for fieldName, fieldGraph := range graph.Fields {
+		for fieldName, fieldGraph := range g.Fields {
 			if fieldName == "__elem" {
 				continue
 			}
@@ -485,16 +605,16 @@ func (rm *RequestMigration) migrateBackward(graph *TypeGraph, data *any) error {
 			if !ok || fieldData == nil {
 				continue
 			}
-			if err := rm.migrateBackward(fieldGraph, &fieldData); err != nil {
+			if err := fieldGraph.MigrateBackward(ctx, &fieldData); err != nil {
 				return err
 			}
 			v[fieldName] = fieldData
 		}
 	case []interface{}:
-		elemGraph := graph.Fields["__elem"]
+		elemGraph := g.Fields["__elem"]
 		if elemGraph != nil {
 			for i := range v {
-				if err := rm.migrateBackward(elemGraph, &v[i]); err != nil {
+				if err := elemGraph.MigrateBackward(ctx, &v[i]); err != nil {
 					return err
 				}
 			}
@@ -548,7 +668,7 @@ func (rm *RequestMigration) registerTypeMigration(version string, t reflect.Type
 	return nil
 }
 
-func (rm *RequestMigration) findMigrationsForType(t reflect.Type, userVersion *Version) []TypeMigration {
+func (rm *RequestMigration) FindMigrationsForType(t reflect.Type, userVersion *Version) []TypeMigration {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 

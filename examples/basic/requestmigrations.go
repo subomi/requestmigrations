@@ -1,13 +1,14 @@
 package main
 
 import (
+	"context"
 	"strings"
 )
 
 // UserMigration handles migrations for the User type
 type UserMigration struct{}
 
-func (m *UserMigration) MigrateForward(data any) (any, error) {
+func (m *UserMigration) MigrateForward(ctx context.Context, data any) (any, error) {
 	d, ok := data.(map[string]any)
 	if !ok {
 		return data, nil
@@ -28,7 +29,7 @@ func (m *UserMigration) MigrateForward(data any) (any, error) {
 	return d, nil
 }
 
-func (m *UserMigration) MigrateBackward(data any) (any, error) {
+func (m *UserMigration) MigrateBackward(ctx context.Context, data any) (any, error) {
 	d, ok := data.(map[string]any)
 	if !ok {
 		return data, nil
@@ -45,7 +46,7 @@ func (m *UserMigration) MigrateBackward(data any) (any, error) {
 // ProfileMigration handles migrations for the profile type if needed
 type ProfileMigration struct{}
 
-func (m *ProfileMigration) MigrateForward(data any) (any, error) {
+func (m *ProfileMigration) MigrateForward(ctx context.Context, data any) (any, error) {
 	// If it's just a string (old format), we can't fully reconstruct the profile
 	// but we can at least put the UID in.
 	if uid, ok := data.(string); ok {
@@ -56,7 +57,7 @@ func (m *ProfileMigration) MigrateForward(data any) (any, error) {
 	return data, nil
 }
 
-func (m *ProfileMigration) MigrateBackward(data any) (any, error) {
+func (m *ProfileMigration) MigrateBackward(ctx context.Context, data any) (any, error) {
 	d, ok := data.(map[string]any)
 	if !ok {
 		return data, nil
