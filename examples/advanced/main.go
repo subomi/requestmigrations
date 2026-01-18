@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -35,7 +36,7 @@ type Project struct {
 // UserMigration handles email -> username renaming
 type UserMigrationV20230601 struct{}
 
-func (m *UserMigrationV20230601) MigrateForward(data any) (any, error) {
+func (m *UserMigrationV20230601) MigrateForward(ctx context.Context, data any) (any, error) {
 	d := data.(map[string]any)
 	if email, ok := d["email"].(string); ok {
 		d["username"] = email
@@ -44,7 +45,7 @@ func (m *UserMigrationV20230601) MigrateForward(data any) (any, error) {
 	return d, nil
 }
 
-func (m *UserMigrationV20230601) MigrateBackward(data any) (any, error) {
+func (m *UserMigrationV20230601) MigrateBackward(ctx context.Context, data any) (any, error) {
 	d := data.(map[string]any)
 	if username, ok := d["username"].(string); ok {
 		d["email"] = username
@@ -56,7 +57,7 @@ func (m *UserMigrationV20230601) MigrateBackward(data any) (any, error) {
 // WorkspaceMigration handles projects slice -> map conversion
 type WorkspaceMigrationV20240101 struct{}
 
-func (m *WorkspaceMigrationV20240101) MigrateForward(data any) (any, error) {
+func (m *WorkspaceMigrationV20240101) MigrateForward(ctx context.Context, data any) (any, error) {
 	d := data.(map[string]any)
 	if projects, ok := d["projects"].([]any); ok {
 		projectMap := make(map[string]any)
@@ -71,7 +72,7 @@ func (m *WorkspaceMigrationV20240101) MigrateForward(data any) (any, error) {
 	return d, nil
 }
 
-func (m *WorkspaceMigrationV20240101) MigrateBackward(data any) (any, error) {
+func (m *WorkspaceMigrationV20240101) MigrateBackward(ctx context.Context, data any) (any, error) {
 	d := data.(map[string]any)
 	if projectMap, ok := d["projects"].(map[string]any); ok {
 		projects := make([]any, 0, len(projectMap))
@@ -117,7 +118,12 @@ func main() {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-API-Version", "2023-01-01")
 
-	data, err := rm.WithUserVersion(req).Marshal(w)
+	migrator, err := rm.For(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	data, err := migrator.Marshal(w)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -137,7 +143,7 @@ func main() {
 	}`
 
 	var incoming Workspace
-	err = rm.WithUserVersion(req).Unmarshal([]byte(oldJSON), &incoming)
+	err = migrator.Unmarshal([]byte(oldJSON), &incoming)
 	if err != nil {
 		log.Fatal(err)
 	}
