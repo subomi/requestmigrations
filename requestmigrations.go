@@ -563,10 +563,10 @@ func newTypeGraphBuilder(finder migrationFinder, cache *sync.Map) *typeGraphBuil
 
 func (b *typeGraphBuilder) buildFromType(t reflect.Type, userVersion *Version) (*typeGraph, error) {
 	t = dereferenceToLastPtr(t)
-	return b.buildFromTypeRecursive(t, userVersion, make(map[reflect.Type]*typeGraph))
+	return b.walkType(t, userVersion, make(map[reflect.Type]*typeGraph))
 }
 
-func (b *typeGraphBuilder) buildFromTypeRecursive(t reflect.Type, userVersion *Version, visited map[reflect.Type]*typeGraph) (*typeGraph, error) {
+func (b *typeGraphBuilder) walkType(t reflect.Type, userVersion *Version, visited map[reflect.Type]*typeGraph) (*typeGraph, error) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
@@ -584,7 +584,7 @@ func (b *typeGraphBuilder) buildFromTypeRecursive(t reflect.Type, userVersion *V
 	graph.Migrations = b.finder.FindMigrationsForType(t, userVersion)
 
 	if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
-		elemGraph, err := b.buildFromTypeRecursive(t.Elem(), userVersion, visited)
+		elemGraph, err := b.walkType(t.Elem(), userVersion, visited)
 		if err != nil {
 			return nil, err
 		}
@@ -597,7 +597,7 @@ func (b *typeGraphBuilder) buildFromTypeRecursive(t reflect.Type, userVersion *V
 	if t.Kind() == reflect.Struct {
 		for i := 0; i < t.NumField(); i++ {
 			field := t.Field(i)
-			fieldGraph, err := b.buildFromTypeRecursive(field.Type, userVersion, visited)
+			fieldGraph, err := b.walkType(field.Type, userVersion, visited)
 			if err != nil {
 				return nil, err
 			}
@@ -616,10 +616,10 @@ func (b *typeGraphBuilder) buildFromTypeRecursive(t reflect.Type, userVersion *V
 }
 
 func (b *typeGraphBuilder) buildFromValue(v reflect.Value, userVersion *Version) (*typeGraph, error) {
-	return b.buildFromValueRecursive(v, userVersion, make(map[reflect.Type]*typeGraph))
+	return b.walkValue(v, userVersion, make(map[reflect.Type]*typeGraph))
 }
 
-func (b *typeGraphBuilder) buildFromValueRecursive(v reflect.Value, userVersion *Version, visited map[reflect.Type]*typeGraph) (*typeGraph, error) {
+func (b *typeGraphBuilder) walkValue(v reflect.Value, userVersion *Version, visited map[reflect.Type]*typeGraph) (*typeGraph, error) {
 	for v.Kind() == reflect.Ptr {
 		if v.IsNil() {
 			return &typeGraph{Fields: make(map[string]*typeGraph)}, nil
@@ -652,7 +652,7 @@ func (b *typeGraphBuilder) buildFromValueRecursive(v reflect.Value, userVersion 
 				elemValue = elemValue.Elem()
 			}
 
-			elemGraph, err := b.buildFromValueRecursive(elemValue, userVersion, visited)
+			elemGraph, err := b.walkValue(elemValue, userVersion, visited)
 			if err != nil {
 				return nil, err
 			}
@@ -679,7 +679,7 @@ func (b *typeGraphBuilder) buildFromValueRecursive(v reflect.Value, userVersion 
 					continue
 				}
 				actualValue := fieldValue.Elem()
-				fieldGraph, err = b.buildFromValueRecursive(actualValue, userVersion, visited)
+				fieldGraph, err = b.walkValue(actualValue, userVersion, visited)
 			} else {
 				fieldGraph, err = b.buildFromType(field.Type, userVersion)
 			}
