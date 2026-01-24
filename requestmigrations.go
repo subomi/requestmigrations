@@ -26,6 +26,7 @@ var (
 	ErrInvalidVersion              = errors.New("invalid version number")
 	ErrInvalidVersionFormat        = errors.New("invalid version format")
 	ErrCurrentVersionCannotBeEmpty = errors.New("current version field cannot be empty")
+	ErrNativeTypeMigration         = errors.New("cannot register migration for native Go type; use a custom type alias instead (e.g., 'type MyString string')")
 )
 
 type userVersionKey struct{}
@@ -362,7 +363,7 @@ func (m *Migrator) Marshal(v interface{}) ([]byte, error) {
 		return nil, err
 	}
 
-		m.rm.observeRequestLatency(currentVersion, m.userVersion, startTime)
+	m.rm.observeRequestLatency(currentVersion, m.userVersion, startTime)
 
 	return result, nil
 }
@@ -703,5 +704,29 @@ func (b *typeGraphBuilder) walkValue(v reflect.Value, userVersion *Version, visi
 
 func Register[T any](rm *RequestMigration, version string, m TypeMigration) error {
 	t := reflect.TypeOf((*T)(nil)).Elem()
+	if !isValidMigrationType(t) {
+		return ErrNativeTypeMigration
+	}
 	return rm.registerTypeMigration(version, t, m)
+}
+
+// isValidMigrationType returns true ONLY if the type is a user-defined named type.
+// It blocks built-in primitives (string, int) AND unnamed composites ([]string, map[int]int).
+//
+// Allowed: type MyString string, type User struct
+// Blocked: string, int, []byte, map[string]string, interface{}, error
+func isValidMigrationType(t reflect.Type) bool {
+	// Dereference pointers to get the underlying type
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	// If PkgPath is empty, it is a built-in type (string, int, error)
+	// OR an unnamed composite literal ([]string, map[int]int).
+	// We generally want to block ALL of these for migrations.
+	if t.PkgPath() == "" {
+		return false
+	}
+
+	return true
 }

@@ -14,27 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TODO(subomi): For tests should focus on migrating different complex types
-// and analyzing why it's not working. E.g. Primitive Types, Structs, Nested Structs,
-// interfaces{}, map types, arrays, cycles etc.
-
-// Test Cases
-// Primitive Types
-//	- Int
-// 	- string
-// 	- etc.
-// Pointer to Primitive Types
-// --------------------------
-// Structs.
-// Pointer to Structs.
-// Cyclic Structs.
-// Nested Structs.
-// interface{}
-// interface type
-// Generic types
-// --------------------------
-// 1. Inside each type we test both Marshal & Unmarshal.
-
 type NameReader interface {
 	Read(string) string
 }
@@ -78,7 +57,7 @@ func (m *addressMigration) MigrateBackward(ctx context.Context, data any) (any, 
 	addrString := fmt.Sprintf("%s %s %s %s", a["streetName"],
 		a["state"], a["country"], a["postCode"])
 
-	return []byte(addrString), nil
+	return addrString, nil
 }
 
 func newRequestMigration(t *testing.T) *RequestMigration {
@@ -105,41 +84,72 @@ func registerVersions(t *testing.T, rm *RequestMigration) {
 	}
 }
 
-// TODO(subomi): This test is meaningless. There's a transformation because the request
-// is for version 2023-02-01, so the user should see an address string which happens in
-// MigrateBackward method.
 func Test_Marshal(t *testing.T) {
 	rm := newRequestMigration(t)
 	registerVersions(t, rm)
 
-	tests := map[string]struct {
-		assert require.ErrorAssertionFunc
-	}{
-		"no_transformation": {
-			assert: require.NoError,
-		},
-	}
+	t.Run("transforms address struct to string for older version", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/profile", strings.NewReader(""))
+		req.Header.Add("X-Test-Version", "2023-02-01")
 
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/profile", strings.NewReader(""))
-			req.Header.Add("X-Test-Version", "2023-02-01")
+		pStruct := profilev2{
+			FirstName: "John",
+			LastName:  "Doe",
+			Address: &address{
+				StreetName: "123 Main St",
+				State:      "London",
+				Country:    "UK",
+				Postcode:   "CR0 1GB",
+			},
+		}
+		migrator, err := rm.For(req)
+		require.NoError(t, err)
 
-			pStruct := profilev2{
-				Address: &address{
-					State:    "London",
-					Postcode: "CR0 1GB",
-				},
-			}
-			migrator, err := rm.For(req)
-			require.NoError(t, err)
+		bytesW, err := migrator.Marshal(&pStruct)
+		require.NoError(t, err)
 
-			bytesW, err := migrator.Marshal(&pStruct)
+		var res map[string]interface{}
+		err = json.Unmarshal(bytesW, &res)
+		require.NoError(t, err)
 
-			_ = bytesW
-			tc.assert(t, err)
-		})
-	}
+		// Address should be transformed from struct to string by MigrateBackward
+		// Format: "streetName state country postCode"
+		expectedAddr := "123 Main St London UK CR0 1GB"
+		require.Equal(t, expectedAddr, string(res["Address"].(string)))
+		require.Equal(t, "John", res["firstName"])
+		require.Equal(t, "Doe", res["lastName"])
+	})
+
+	t.Run("no transformation for current version", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/profile", strings.NewReader(""))
+		req.Header.Add("X-Test-Version", "2023-03-01")
+
+		pStruct := profilev2{
+			FirstName: "Jane",
+			LastName:  "Smith",
+			Address: &address{
+				StreetName: "456 Oak Ave",
+				State:      "Manchester",
+				Country:    "UK",
+				Postcode:   "M1 2AB",
+			},
+		}
+		migrator, err := rm.For(req)
+		require.NoError(t, err)
+
+		bytesW, err := migrator.Marshal(&pStruct)
+		require.NoError(t, err)
+
+		var res map[string]interface{}
+		err = json.Unmarshal(bytesW, &res)
+		require.NoError(t, err)
+
+		// Address should remain as struct for current version
+		addrMap, ok := res["Address"].(map[string]interface{})
+		require.True(t, ok, "Address should be a map for current version")
+		require.Equal(t, "456 Oak Ave", addrMap["streetName"])
+		require.Equal(t, "Manchester", addrMap["state"])
+	})
 }
 
 func Test_Unmarshal(t *testing.T) {}
@@ -177,61 +187,458 @@ func Test_CustomPrimitive(t *testing.T) {
 	rm, _ := NewRequestMigration(opts)
 	Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
 
-	// TODO(subomi): We can merge these two into one test case.
-	// It doesn't need to be separate.
-	t.Run("Marshal custom primitive", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Add("X-Test-Version", "2023-02-01")
+	tests := []struct {
+		name              string
+		inputAddress      string
+		expectedMarshal   string
+		expectedUnmarshal AddressString
+	}{
+		{
+			name:              "transforms Main St address",
+			inputAddress:      "Main St",
+			expectedMarshal:   "Backward: Main St",
+			expectedUnmarshal: AddressString("Migrated: Main St"),
+		},
+		{
+			name:              "transforms Oak Ave address",
+			inputAddress:      "Oak Ave",
+			expectedMarshal:   "Backward: Oak Ave",
+			expectedUnmarshal: AddressString("Migrated: Oak Ave"),
+		},
+	}
 
-		u := CustomUser{Address: "Main St"}
-		migrator, err := rm.For(req)
-		require.NoError(t, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Add("X-Test-Version", "2023-02-01")
 
-		data, err := migrator.Marshal(&u)
-		require.NoError(t, err)
+			migrator, err := rm.For(req)
+			require.NoError(t, err)
 
-		var res map[string]interface{}
-		json.Unmarshal(data, &res)
-		require.Equal(t, "Backward: Main St", res["address"])
-	})
+			// Test Marshal
+			u := CustomUser{Address: AddressString(tc.inputAddress)}
+			data, err := migrator.Marshal(&u)
+			require.NoError(t, err)
 
-	t.Run("Unmarshal custom primitive", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/", nil)
-		req.Header.Add("X-Test-Version", "2023-02-01")
+			var res map[string]interface{}
+			json.Unmarshal(data, &res)
+			require.Equal(t, tc.expectedMarshal, res["address"])
 
-		jsonData := `{"address": "Main St"}`
-		var u CustomUser
-		migrator, err := rm.For(req)
-		require.NoError(t, err)
+			// Test Unmarshal
+			jsonData := fmt.Sprintf(`{"address": "%s"}`, tc.inputAddress)
+			var unmarshaledUser CustomUser
+			err = migrator.Unmarshal([]byte(jsonData), &unmarshaledUser)
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedUnmarshal, unmarshaledUser.Address)
+		})
+	}
+}
 
-		err = migrator.Unmarshal([]byte(jsonData), &u)
-		require.NoError(t, err)
-		require.Equal(t, AddressString("Migrated: Main St"), u.Address)
-	})
+// dummyMigration is a no-op migration for testing registration validation
+type dummyMigration struct{}
+
+func (m *dummyMigration) MigrateForward(ctx context.Context, data any) (any, error) {
+	return data, nil
+}
+
+func (m *dummyMigration) MigrateBackward(ctx context.Context, data any) (any, error) {
+	return data, nil
+}
+
+// Named composite types for testing - these should be ALLOWED
+type NamedSlice []string
+type NamedMap map[string]int
+type NamedIntSlice []int
+
+func Test_MigrationTypeValidation(t *testing.T) {
+	opts := &RequestMigrationOptions{
+		VersionHeader:  "X-Test-Version",
+		CurrentVersion: "2023-03-01",
+		VersionFormat:  DateFormat,
+	}
+	rm, err := NewRequestMigration(opts)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name         string
+		registerFunc func() error
+		wantErr      bool
+	}{
+		// Built-in primitives - should be REJECTED
+		{
+			name: "rejects native string type",
+			registerFunc: func() error {
+				return Register[string](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects native int type",
+			registerFunc: func() error {
+				return Register[int](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects native bool type",
+			registerFunc: func() error {
+				return Register[bool](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects native float64 type",
+			registerFunc: func() error {
+				return Register[float64](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects native int64 type",
+			registerFunc: func() error {
+				return Register[int64](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects native uint type",
+			registerFunc: func() error {
+				return Register[uint](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+
+		// Unnamed composite types - should be REJECTED
+		{
+			name: "rejects unnamed string slice",
+			registerFunc: func() error {
+				return Register[[]string](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects unnamed int slice",
+			registerFunc: func() error {
+				return Register[[]int](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects unnamed byte slice",
+			registerFunc: func() error {
+				return Register[[]byte](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects unnamed map string to string",
+			registerFunc: func() error {
+				return Register[map[string]string](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects unnamed map string to int",
+			registerFunc: func() error {
+				return Register[map[string]int](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects unnamed interface type",
+			registerFunc: func() error {
+				return Register[interface{}](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects error interface type",
+			registerFunc: func() error {
+				return Register[error](rm, "2023-03-01", &dummyMigration{})
+			},
+			wantErr: true,
+		},
+
+		// User-defined named types - should be ALLOWED
+		{
+			name: "allows custom string type alias",
+			registerFunc: func() error {
+				return Register[AddressString](rm, "2023-02-15", &dummyMigration{})
+			},
+			wantErr: false,
+		},
+		{
+			name: "allows struct type",
+			registerFunc: func() error {
+				return Register[profile](rm, "2023-02-15", &dummyMigration{})
+			},
+			wantErr: false,
+		},
+		{
+			name: "allows named slice type",
+			registerFunc: func() error {
+				return Register[NamedSlice](rm, "2023-02-15", &dummyMigration{})
+			},
+			wantErr: false,
+		},
+		{
+			name: "allows named map type",
+			registerFunc: func() error {
+				return Register[NamedMap](rm, "2023-02-15", &dummyMigration{})
+			},
+			wantErr: false,
+		},
+		{
+			name: "allows named int slice type",
+			registerFunc: func() error {
+				return Register[NamedIntSlice](rm, "2023-02-15", &dummyMigration{})
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.registerFunc()
+			if tc.wantErr {
+				require.Error(t, err)
+				require.ErrorIs(t, err, ErrNativeTypeMigration)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 type CyclicUser struct {
 	ID        string           `json:"id"`
+	Name      string           `json:"name"`
 	Workspace *CyclicWorkspace `json:"workspace"`
 }
 
 type CyclicWorkspace struct {
 	ID    string        `json:"id"`
+	Title string        `json:"title"`
 	Users []*CyclicUser `json:"users"`
 }
 
-// TODO(subomi): This test isn't robust enough.
+type cyclicUserMigration struct{}
+
+func (m *cyclicUserMigration) MigrateForward(ctx context.Context, data any) (any, error) {
+	d, ok := data.(map[string]interface{})
+	if !ok {
+		return data, nil
+	}
+	// v1 -> v2: "username" becomes "name"
+	if username, exists := d["username"]; exists {
+		d["name"] = username
+		delete(d, "username")
+	}
+	return d, nil
+}
+
+func (m *cyclicUserMigration) MigrateBackward(ctx context.Context, data any) (any, error) {
+	d, ok := data.(map[string]interface{})
+	if !ok {
+		return data, nil
+	}
+	// v2 -> v1: "name" becomes "username"
+	if name, exists := d["name"]; exists {
+		d["username"] = name
+		delete(d, "name")
+	}
+	return d, nil
+}
+
+type cyclicWorkspaceMigration struct{}
+
+func (m *cyclicWorkspaceMigration) MigrateForward(ctx context.Context, data any) (any, error) {
+	d, ok := data.(map[string]interface{})
+	if !ok {
+		return data, nil
+	}
+	// v1 -> v2: "name" becomes "title"
+	if name, exists := d["name"]; exists {
+		d["title"] = name
+		delete(d, "name")
+	}
+	return d, nil
+}
+
+func (m *cyclicWorkspaceMigration) MigrateBackward(ctx context.Context, data any) (any, error) {
+	d, ok := data.(map[string]interface{})
+	if !ok {
+		return data, nil
+	}
+	// v2 -> v1: "title" becomes "name"
+	if title, exists := d["title"]; exists {
+		d["name"] = title
+		delete(d, "title")
+	}
+	return d, nil
+}
+
 func Test_Cycles(t *testing.T) {
 	opts := &RequestMigrationOptions{
 		VersionHeader:  "X-Test-Version",
 		CurrentVersion: "2023-03-01",
 		VersionFormat:  DateFormat,
 	}
-	rm, _ := NewRequestMigration(opts)
 
-	t.Run("Build graph with cycles", func(t *testing.T) {
+	t.Run("build graph with cycles", func(t *testing.T) {
+		rm, _ := NewRequestMigration(opts)
 		_, err := rm.graphBuilder.buildFromType(reflect.TypeOf(CyclicUser{}), &Version{Format: DateFormat, Value: "2023-01-01"})
 		require.NoError(t, err)
+	})
+
+	t.Run("marshal cyclic structure with migrations", func(t *testing.T) {
+		rm, _ := NewRequestMigration(opts)
+		Register[CyclicUser](rm, "2023-03-01", &cyclicUserMigration{})
+		Register[CyclicWorkspace](rm, "2023-03-01", &cyclicWorkspaceMigration{})
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-01-01") // old version
+
+		user := &CyclicUser{
+			ID:   "user-1",
+			Name: "Alice",
+			Workspace: &CyclicWorkspace{
+				ID:    "ws-1",
+				Title: "Engineering",
+				Users: []*CyclicUser{
+					{ID: "user-2", Name: "Bob"},
+				},
+			},
+		}
+
+		migrator, err := rm.For(req)
+		require.NoError(t, err)
+
+		data, err := migrator.Marshal(user)
+		require.NoError(t, err)
+
+		var res map[string]interface{}
+		err = json.Unmarshal(data, &res)
+		require.NoError(t, err)
+
+		// User should have "username" instead of "name"
+		require.Equal(t, "Alice", res["username"])
+		require.Nil(t, res["name"])
+
+		// Workspace should have "name" instead of "title"
+		ws := res["workspace"].(map[string]interface{})
+		require.Equal(t, "Engineering", ws["name"])
+		require.Nil(t, ws["title"])
+
+		// Nested users should also be migrated
+		users := ws["users"].([]interface{})
+		nestedUser := users[0].(map[string]interface{})
+		require.Equal(t, "Bob", nestedUser["username"])
+		require.Nil(t, nestedUser["name"])
+	})
+
+	t.Run("unmarshal cyclic structure with migrations", func(t *testing.T) {
+		rm, _ := NewRequestMigration(opts)
+		Register[CyclicUser](rm, "2023-03-01", &cyclicUserMigration{})
+		Register[CyclicWorkspace](rm, "2023-03-01", &cyclicWorkspaceMigration{})
+
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-01-01") // old version
+
+		// JSON from old API client (using old field names)
+		jsonData := `{
+			"id": "user-1",
+			"username": "Alice",
+			"workspace": {
+				"id": "ws-1",
+				"name": "Engineering",
+				"users": [
+					{"id": "user-2", "username": "Bob"}
+				]
+			}
+		}`
+
+		migrator, err := rm.For(req)
+		require.NoError(t, err)
+
+		var user CyclicUser
+		err = migrator.Unmarshal([]byte(jsonData), &user)
+		require.NoError(t, err)
+
+		// User should have name populated from "username"
+		require.Equal(t, "user-1", user.ID)
+		require.Equal(t, "Alice", user.Name)
+
+		// Workspace should have title populated from "name"
+		require.NotNil(t, user.Workspace)
+		require.Equal(t, "ws-1", user.Workspace.ID)
+		require.Equal(t, "Engineering", user.Workspace.Title)
+
+		// Nested users should also be migrated
+		require.Len(t, user.Workspace.Users, 1)
+		require.Equal(t, "user-2", user.Workspace.Users[0].ID)
+		require.Equal(t, "Bob", user.Workspace.Users[0].Name)
+	})
+
+	t.Run("deeply nested cycles", func(t *testing.T) {
+		rm, _ := NewRequestMigration(opts)
+		Register[CyclicUser](rm, "2023-03-01", &cyclicUserMigration{})
+		Register[CyclicWorkspace](rm, "2023-03-01", &cyclicWorkspaceMigration{})
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-01-01")
+
+		// Create a structure with multiple levels of nesting
+		user := &CyclicUser{
+			ID:   "user-1",
+			Name: "Alice",
+			Workspace: &CyclicWorkspace{
+				ID:    "ws-1",
+				Title: "Engineering",
+				Users: []*CyclicUser{
+					{
+						ID:   "user-2",
+						Name: "Bob",
+						Workspace: &CyclicWorkspace{
+							ID:    "ws-2",
+							Title: "Design",
+							Users: []*CyclicUser{
+								{ID: "user-3", Name: "Charlie"},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		migrator, err := rm.For(req)
+		require.NoError(t, err)
+
+		data, err := migrator.Marshal(user)
+		require.NoError(t, err)
+
+		var res map[string]interface{}
+		err = json.Unmarshal(data, &res)
+		require.NoError(t, err)
+
+		// Verify top-level user
+		require.Equal(t, "Alice", res["username"])
+
+		// Verify nested workspace and user
+		ws1 := res["workspace"].(map[string]interface{})
+		require.Equal(t, "Engineering", ws1["name"])
+
+		users1 := ws1["users"].([]interface{})
+		user2 := users1[0].(map[string]interface{})
+		require.Equal(t, "Bob", user2["username"])
+
+		// Verify deeply nested workspace and user
+		ws2 := user2["workspace"].(map[string]interface{})
+		require.Equal(t, "Design", ws2["name"])
+
+		users2 := ws2["users"].([]interface{})
+		user3 := users2[0].(map[string]interface{})
+		require.Equal(t, "Charlie", user3["username"])
 	})
 }
 
@@ -244,44 +651,73 @@ func Test_RootSlice(t *testing.T) {
 	rm, _ := NewRequestMigration(opts)
 	Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
 
-	// TODO(subomi): We can merge these two into one test case.
-	// It doesn't need to be separate.
-	t.Run("Marshal root slice", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Add("X-Test-Version", "2023-02-01")
+	tests := []struct {
+		name              string
+		addresses         []string
+		expectedMarshal   []string
+		expectedUnmarshal []AddressString
+	}{
+		{
+			name:              "two addresses",
+			addresses:         []string{"Main St", "Second St"},
+			expectedMarshal:   []string{"Backward: Main St", "Backward: Second St"},
+			expectedUnmarshal: []AddressString{"Migrated: Main St", "Migrated: Second St"},
+		},
+		{
+			name:              "single address",
+			addresses:         []string{"Oak Ave"},
+			expectedMarshal:   []string{"Backward: Oak Ave"},
+			expectedUnmarshal: []AddressString{"Migrated: Oak Ave"},
+		},
+		{
+			name:              "empty slice",
+			addresses:         []string{},
+			expectedMarshal:   []string{},
+			expectedUnmarshal: []AddressString{},
+		},
+	}
 
-		users := []CustomUser{
-			{Address: "Main St"},
-			{Address: "Second St"},
-		}
-		migrator, err := rm.For(req)
-		require.NoError(t, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Add("X-Test-Version", "2023-02-01")
 
-		data, err := migrator.Marshal(&users)
-		require.NoError(t, err)
+			migrator, err := rm.For(req)
+			require.NoError(t, err)
 
-		var res []map[string]interface{}
-		json.Unmarshal(data, &res)
-		require.Len(t, res, 2)
-		require.Equal(t, "Backward: Main St", res[0]["address"])
-		require.Equal(t, "Backward: Second St", res[1]["address"])
-	})
+			// Build input slice
+			users := make([]CustomUser, len(tc.addresses))
+			for i, addr := range tc.addresses {
+				users[i] = CustomUser{Address: AddressString(addr)}
+			}
 
-	t.Run("Unmarshal root slice", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/", nil)
-		req.Header.Add("X-Test-Version", "2023-02-01")
+			// Test Marshal
+			data, err := migrator.Marshal(&users)
+			require.NoError(t, err)
 
-		jsonData := `[{"address": "Main St"}, {"address": "Second St"}]`
-		var users []CustomUser
-		migrator, err := rm.For(req)
-		require.NoError(t, err)
+			var res []map[string]interface{}
+			json.Unmarshal(data, &res)
+			require.Len(t, res, len(tc.expectedMarshal))
+			for i, expected := range tc.expectedMarshal {
+				require.Equal(t, expected, res[i]["address"])
+			}
 
-		err = migrator.Unmarshal([]byte(jsonData), &users)
-		require.NoError(t, err)
-		require.Len(t, users, 2)
-		require.Equal(t, AddressString("Migrated: Main St"), users[0].Address)
-		require.Equal(t, AddressString("Migrated: Second St"), users[1].Address)
-	})
+			// Test Unmarshal - build JSON array
+			var jsonParts []string
+			for _, addr := range tc.addresses {
+				jsonParts = append(jsonParts, fmt.Sprintf(`{"address": "%s"}`, addr))
+			}
+			jsonData := "[" + strings.Join(jsonParts, ", ") + "]"
+
+			var unmarshaledUsers []CustomUser
+			err = migrator.Unmarshal([]byte(jsonData), &unmarshaledUsers)
+			require.NoError(t, err)
+			require.Len(t, unmarshaledUsers, len(tc.expectedUnmarshal))
+			for i, expected := range tc.expectedUnmarshal {
+				require.Equal(t, expected, unmarshaledUsers[i].Address)
+			}
+		})
+	}
 }
 
 type chainMigrationV2 struct{}
