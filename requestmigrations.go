@@ -197,6 +197,57 @@ func (rm *RequestMigration) FindMigrationsForType(t reflect.Type, userVersion *V
 	return applicableMigrations
 }
 
+// Register adds one or more type migrations. Returns rm for chaining.
+// Errors are accumulated and surfaced when Build is called.
+func (rm *RequestMigration) Register(migrations ...VersionedTypeMigration) *RequestMigration {
+	if rm.err != nil {
+		return rm
+	}
+
+	if rm.built {
+		rm.err = ErrAlreadyBuilt
+		return rm
+	}
+
+	for _, entry := range migrations {
+		if !isValidMigrationType(entry.t) {
+			rm.err = ErrNativeTypeMigration
+			return rm
+		}
+		rm.registerTypeMigration(entry.version, entry.t, entry.migration)
+	}
+
+	return rm
+}
+
+// Build sorts versions, eagerly builds type graphs, and marks the instance as
+// ready for use. Must be called after all Register calls and before For/Bind.
+func (rm *RequestMigration) Build() error {
+	if rm.err != nil {
+		return rm.err
+	}
+
+	if rm.built {
+		return ErrAlreadyBuilt
+	}
+
+	switch rm.opts.VersionFormat {
+	case SemverFormat:
+		sort.Slice(rm.versions, semVerSorter(rm.versions))
+	case DateFormat:
+		sort.Slice(rm.versions, dateVersionSorter(rm.versions))
+	default:
+		return ErrInvalidVersionFormat
+	}
+
+	for t := range rm.migrations {
+		rm.buildAndCacheGraphsForType(t, rm.versions)
+	}
+
+	rm.built = true
+	return nil
+}
+
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
 	var vh = req.Header.Get(rm.opts.VersionHeader)
 
@@ -297,52 +348,6 @@ func (rm *RequestMigration) buildAndCacheGraphsForType(t reflect.Type, versions 
 		// Store in cache — sync.Map handles concurrency
 		rm.graphCache.Store(key, graph)
 	}
-}
-
-// readBody converts v to a generic JSON representation (map/slice/primitive)
-// by streaming the encoding directly into the decoder via an io.Pipe,
-// avoiding a full intermediate []byte allocation.
-func readBody(v any) (any, error) {
-	pr, pw := io.Pipe()
-
-	var result any
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- json.NewDecoder(pr).Decode(&result)
-	}()
-
-	if err := json.NewEncoder(pw).Encode(v); err != nil {
-		pw.CloseWithError(err)
-		<-errCh
-		return nil, err
-	}
-	pw.Close()
-
-	if err := <-errCh; err != nil {
-		return nil, err
-	}
-
-	return result, nil
-}
-
-// writeBody streams a generic JSON representation into the typed destination v,
-// avoiding a full intermediate []byte allocation.
-func writeBody(src any, dst any) error {
-	pr, pw := io.Pipe()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- json.NewDecoder(pr).Decode(dst)
-	}()
-
-	if err := json.NewEncoder(pw).Encode(src); err != nil {
-		pw.CloseWithError(err)
-		<-errCh
-		return err
-	}
-	pw.Close()
-
-	return <-errCh
 }
 
 // Migrator is a request-scoped handle for performing migrations.
@@ -731,58 +736,6 @@ func Migration[T any](version string, m TypeMigration) VersionedTypeMigration {
 	}
 }
 
-// Register adds one or more type migrations. Returns rm for chaining.
-// Errors are accumulated and surfaced when Build is called.
-func (rm *RequestMigration) Register(migrations ...VersionedTypeMigration) *RequestMigration {
-	if rm.err != nil {
-		return rm
-	}
-
-	if rm.built {
-		rm.err = ErrAlreadyBuilt
-		return rm
-	}
-
-	for _, entry := range migrations {
-		if !isValidMigrationType(entry.t) {
-			rm.err = ErrNativeTypeMigration
-			return rm
-		}
-		rm.registerTypeMigration(entry.version, entry.t, entry.migration)
-	}
-
-	return rm
-}
-
-// Build sorts versions, eagerly builds type graphs, and marks the instance as
-// ready for use. Must be called after all Register calls and before For/Bind.
-func (rm *RequestMigration) Build() error {
-	if rm.err != nil {
-		return rm.err
-	}
-
-	if rm.built {
-		return ErrAlreadyBuilt
-	}
-
-	switch rm.opts.VersionFormat {
-	case SemverFormat:
-		sort.Slice(rm.versions, semVerSorter(rm.versions))
-	case DateFormat:
-		sort.Slice(rm.versions, dateVersionSorter(rm.versions))
-	default:
-		return ErrInvalidVersionFormat
-	}
-
-	for t := range rm.migrations {
-		rm.buildAndCacheGraphsForType(t, rm.versions)
-	}
-
-	rm.built = true
-	return nil
-}
-
-
 // isValidMigrationType returns true ONLY if the type is a user-defined named type.
 // It blocks built-in primitives (string, int) AND unnamed composites ([]string, map[int]int).
 //
@@ -802,4 +755,50 @@ func isValidMigrationType(t reflect.Type) bool {
 	}
 
 	return true
+}
+
+// readBody converts v to a generic JSON representation (map/slice/primitive)
+// by streaming the encoding directly into the decoder via an io.Pipe,
+// avoiding a full intermediate []byte allocation.
+func readBody(v any) (any, error) {
+	pr, pw := io.Pipe()
+
+	var result any
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- json.NewDecoder(pr).Decode(&result)
+	}()
+
+	if err := json.NewEncoder(pw).Encode(v); err != nil {
+		pw.CloseWithError(err)
+		<-errCh
+		return nil, err
+	}
+	pw.Close()
+
+	if err := <-errCh; err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// writeBody streams a generic JSON representation into the typed destination v,
+// avoiding a full intermediate []byte allocation.
+func writeBody(src, dst any) error {
+	pr, pw := io.Pipe()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- json.NewDecoder(pr).Decode(dst)
+	}()
+
+	if err := json.NewEncoder(pw).Encode(src); err != nil {
+		pw.CloseWithError(err)
+		<-errCh
+		return err
+	}
+	pw.Close()
+
+	return <-errCh
 }
