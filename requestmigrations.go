@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"reflect"
 	"sort"
@@ -27,6 +28,8 @@ var (
 	ErrInvalidVersionFormat        = errors.New("invalid version format")
 	ErrCurrentVersionCannotBeEmpty = errors.New("current version field cannot be empty")
 	ErrNativeTypeMigration         = errors.New("cannot register migration for native Go type; use a custom type alias instead (e.g., 'type MyString string')")
+	ErrAlreadyBuilt                = errors.New("cannot register migrations after Build() has been called")
+	ErrNotBuilt                    = errors.New("must call Build() before using RequestMigration")
 )
 
 type userVersionKey struct{}
@@ -73,11 +76,13 @@ type RequestMigration struct {
 	metric   *prometheus.HistogramVec
 	iv       string
 
-	mu         *sync.RWMutex
 	migrations map[reflect.Type]map[string]TypeMigration // type -> version -> migration
 
 	graphBuilder *typeGraphBuilder
 	graphCache   sync.Map
+
+	built bool
+	err   error
 }
 
 func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, error) {
@@ -110,7 +115,6 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 		metric:     me,
 		iv:         iv,
 		versions:   versions,
-		mu:         new(sync.RWMutex),
 		migrations: make(map[reflect.Type]map[string]TypeMigration),
 	}
 
@@ -121,6 +125,10 @@ func NewRequestMigration(opts *RequestMigrationOptions) (*RequestMigration, erro
 
 // For creates a request-scoped Migrator for performing migrations.
 func (rm *RequestMigration) For(r *http.Request) (*Migrator, error) {
+	if !rm.built {
+		return nil, ErrNotBuilt
+	}
+
 	if r == nil {
 		return nil, errors.New("request cannot be nil")
 	}
@@ -168,9 +176,6 @@ func (rm *RequestMigration) WriteVersionHeader() func(next http.Handler) http.Ha
 
 // FindMigrationsForType returns all migrations applicable to a type from a given version forward.
 func (rm *RequestMigration) FindMigrationsForType(t reflect.Type, userVersion *Version) []TypeMigration {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-
 	var applicableMigrations []TypeMigration
 
 	typeHistory, ok := rm.migrations[t]
@@ -190,6 +195,57 @@ func (rm *RequestMigration) FindMigrationsForType(t reflect.Type, userVersion *V
 	}
 
 	return applicableMigrations
+}
+
+// Register adds one or more type migrations. Returns rm for chaining.
+// Errors are accumulated and surfaced when Build is called.
+func (rm *RequestMigration) Register(migrations ...VersionedTypeMigration) *RequestMigration {
+	if rm.err != nil {
+		return rm
+	}
+
+	if rm.built {
+		rm.err = ErrAlreadyBuilt
+		return rm
+	}
+
+	for _, entry := range migrations {
+		if !isValidMigrationType(entry.t) {
+			rm.err = ErrNativeTypeMigration
+			return rm
+		}
+		rm.registerTypeMigration(entry.version, entry.t, entry.migration)
+	}
+
+	return rm
+}
+
+// Build sorts versions, eagerly builds type graphs, and marks the instance as
+// ready for use. Must be called after all Register calls and before For/Bind.
+func (rm *RequestMigration) Build() error {
+	if rm.err != nil {
+		return rm.err
+	}
+
+	if rm.built {
+		return ErrAlreadyBuilt
+	}
+
+	switch rm.opts.VersionFormat {
+	case SemverFormat:
+		sort.Slice(rm.versions, semVerSorter(rm.versions))
+	case DateFormat:
+		sort.Slice(rm.versions, dateVersionSorter(rm.versions))
+	default:
+		return ErrInvalidVersionFormat
+	}
+
+	for t := range rm.migrations {
+		rm.buildAndCacheGraphsForType(t, rm.versions)
+	}
+
+	rm.built = true
+	return nil
 }
 
 func (rm *RequestMigration) getUserVersion(req *http.Request) (*Version, error) {
@@ -243,17 +299,11 @@ func (rm *RequestMigration) observeRequestLatency(from, to *Version, sT time.Tim
 	h.Observe(latency.Seconds())
 }
 
-func (rm *RequestMigration) registerTypeMigration(version string, t reflect.Type, m TypeMigration) error {
-	// Copy versions for graph building (done outside the lock)
-	var versionsCopy []*Version
-
-	rm.mu.Lock()
-
+func (rm *RequestMigration) registerTypeMigration(version string, t reflect.Type, m TypeMigration) {
 	if rm.migrations == nil {
 		rm.migrations = make(map[reflect.Type]map[string]TypeMigration)
 	}
 
-	// Check if this version is already known
 	versionKnown := false
 	for _, v := range rm.versions {
 		if v.Value == version {
@@ -264,39 +314,16 @@ func (rm *RequestMigration) registerTypeMigration(version string, t reflect.Type
 
 	if !versionKnown {
 		rm.versions = append(rm.versions, &Version{Format: rm.opts.VersionFormat, Value: version})
-
-		switch rm.opts.VersionFormat {
-		case SemverFormat:
-			sort.Slice(rm.versions, semVerSorter(rm.versions))
-		case DateFormat:
-			sort.Slice(rm.versions, dateVersionSorter(rm.versions))
-		default:
-			rm.mu.Unlock()
-			return ErrInvalidVersionFormat
-		}
 	}
 
-	// Internal Type-Centric Pivot: map[Type]map[Version]Migration
 	if _, ok := rm.migrations[t]; !ok {
 		rm.migrations[t] = make(map[string]TypeMigration)
 	}
 	rm.migrations[t][version] = m
-
-	// Copy versions for graph building outside the lock
-	versionsCopy = make([]*Version, len(rm.versions))
-	copy(versionsCopy, rm.versions)
-
-	rm.mu.Unlock()
-
-	// Eagerly build and cache graphs for this type across all known versions
-	// This is done outside the write lock since building only needs read access
-	rm.buildAndCacheGraphsForType(t, versionsCopy)
-
-	return nil
 }
 
 // buildAndCacheGraphsForType builds and caches type graphs for all known versions.
-// Called during registration to eagerly populate the cache.
+// Called during Build to eagerly populate the cache.
 // Types with interface fields are skipped - they require runtime value inspection
 // and will be built lazily via buildFromValue.
 func (rm *RequestMigration) buildAndCacheGraphsForType(t reflect.Type, versions []*Version) {
@@ -344,13 +371,8 @@ func (m *Migrator) Marshal(v interface{}) ([]byte, error) {
 
 	currentVersion := m.rm.getCurrentVersion()
 
-	data, err := json.Marshal(v)
+	intermediate, err := readBody(v)
 	if err != nil {
-		return nil, err
-	}
-
-	var intermediate any
-	if err := json.Unmarshal(data, &intermediate); err != nil {
 		return nil, err
 	}
 
@@ -408,12 +430,7 @@ func (m *Migrator) Unmarshal(data []byte, v interface{}) error {
 		return err
 	}
 
-	data, err := json.Marshal(intermediate)
-	if err != nil {
-		return err
-	}
-
-	if err := json.Unmarshal(data, v); err != nil {
+	if err := writeBody(intermediate, v); err != nil {
 		return err
 	}
 
@@ -702,12 +719,21 @@ func (b *typeGraphBuilder) walkValue(v reflect.Value, userVersion *Version, visi
 	return graph, nil
 }
 
-func Register[T any](rm *RequestMigration, version string, m TypeMigration) error {
-	t := reflect.TypeOf((*T)(nil)).Elem()
-	if !isValidMigrationType(t) {
-		return ErrNativeTypeMigration
+// VersionedTypeMigration pairs a type with a version and its migration logic.
+// Construct using the Migration generic helper.
+type VersionedTypeMigration struct {
+	version   string
+	t         reflect.Type
+	migration TypeMigration
+}
+
+// Migration creates a VersionedTypeMigration entry for type T.
+func Migration[T any](version string, m TypeMigration) VersionedTypeMigration {
+	return VersionedTypeMigration{
+		version:   version,
+		t:         reflect.TypeOf((*T)(nil)).Elem(),
+		migration: m,
 	}
-	return rm.registerTypeMigration(version, t, m)
 }
 
 // isValidMigrationType returns true ONLY if the type is a user-defined named type.
@@ -729,4 +755,50 @@ func isValidMigrationType(t reflect.Type) bool {
 	}
 
 	return true
+}
+
+// readBody converts v to a generic JSON representation (map/slice/primitive)
+// by streaming the encoding directly into the decoder via an io.Pipe,
+// avoiding a full intermediate []byte allocation.
+func readBody(v any) (any, error) {
+	pr, pw := io.Pipe()
+
+	var result any
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- json.NewDecoder(pr).Decode(&result)
+	}()
+
+	if err := json.NewEncoder(pw).Encode(v); err != nil {
+		pw.CloseWithError(err)
+		<-errCh
+		return nil, err
+	}
+	pw.Close()
+
+	if err := <-errCh; err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// writeBody streams a generic JSON representation into the typed destination v,
+// avoiding a full intermediate []byte allocation.
+func writeBody(src, dst any) error {
+	pr, pw := io.Pipe()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- json.NewDecoder(pr).Decode(dst)
+	}()
+
+	if err := json.NewEncoder(pw).Encode(src); err != nil {
+		pw.CloseWithError(err)
+		<-errCh
+		return err
+	}
+	pw.Close()
+
+	return <-errCh
 }
