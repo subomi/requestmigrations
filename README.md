@@ -25,18 +25,27 @@ RequestMigrations introduces a **type-based migration system**. Instead of defin
 package main
 
 import (
+	"log"
+
 	rms "github.com/subomi/requestmigrations/v2"
 )
 
 func main() {
     rm, _ := rms.NewRequestMigration(&rms.RequestMigrationOptions{
         VersionHeader:  "X-API-Version",
-        CurrentVersion: "2024-01-01",
+        CurrentVersion: "2024-06-01",
         VersionFormat:  rms.DateFormat,
     })
 
-    // Register migrations for a specific type
-    rms.Register[User](rm, "2024-01-01", &UserMigration{})
+    // Register all migrations, then build.
+    err := rm.Register(
+        rms.Migration[User]("2024-01-01", &UserV1Migration{}),
+        rms.Migration[User]("2024-06-01", &UserV2Migration{}),
+        rms.Migration[Address]("2024-06-01", &AddressMigration{}),
+    ).Build()
+    if err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
