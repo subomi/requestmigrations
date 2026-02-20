@@ -76,9 +76,9 @@ func newRequestMigration(t *testing.T) *RequestMigration {
 }
 
 func registerVersions(t *testing.T, rm *RequestMigration) {
-	// Register migrations for version 2023-03-01
-	err := Register[address](rm, "2023-03-01", &addressMigration{})
-
+	err := rm.Register(
+		Migration[address]("2023-03-01", &addressMigration{}),
+	).Build()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,10 @@ func Test_CustomPrimitive(t *testing.T) {
 		VersionFormat:  DateFormat,
 	}
 	rm, _ := NewRequestMigration(opts)
-	Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+	err := rm.Register(
+		Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+	).Build()
+	require.NoError(t, err)
 
 	tests := []struct {
 		name              string
@@ -256,54 +259,52 @@ func Test_MigrationTypeValidation(t *testing.T) {
 		CurrentVersion: "2023-03-01",
 		VersionFormat:  DateFormat,
 	}
-	rm, err := NewRequestMigration(opts)
-	require.NoError(t, err)
 
 	tests := []struct {
 		name         string
-		registerFunc func() error
+		registerFunc func(rm *RequestMigration) error
 		wantErr      bool
 	}{
 		// Built-in primitives - should be REJECTED
 		{
 			name: "rejects native string type",
-			registerFunc: func() error {
-				return Register[string](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[string]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects native int type",
-			registerFunc: func() error {
-				return Register[int](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[int]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects native bool type",
-			registerFunc: func() error {
-				return Register[bool](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[bool]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects native float64 type",
-			registerFunc: func() error {
-				return Register[float64](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[float64]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects native int64 type",
-			registerFunc: func() error {
-				return Register[int64](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[int64]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects native uint type",
-			registerFunc: func() error {
-				return Register[uint](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[uint]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
@@ -311,50 +312,50 @@ func Test_MigrationTypeValidation(t *testing.T) {
 		// Unnamed composite types - should be REJECTED
 		{
 			name: "rejects unnamed string slice",
-			registerFunc: func() error {
-				return Register[[]string](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[[]string]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects unnamed int slice",
-			registerFunc: func() error {
-				return Register[[]int](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[[]int]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects unnamed byte slice",
-			registerFunc: func() error {
-				return Register[[]byte](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[[]byte]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects unnamed map string to string",
-			registerFunc: func() error {
-				return Register[map[string]string](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[map[string]string]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects unnamed map string to int",
-			registerFunc: func() error {
-				return Register[map[string]int](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[map[string]int]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects unnamed interface type",
-			registerFunc: func() error {
-				return Register[interface{}](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[interface{}]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
 		{
 			name: "rejects error interface type",
-			registerFunc: func() error {
-				return Register[error](rm, "2023-03-01", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[error]("2023-03-01", &dummyMigration{})).Build()
 			},
 			wantErr: true,
 		},
@@ -362,36 +363,36 @@ func Test_MigrationTypeValidation(t *testing.T) {
 		// User-defined named types - should be ALLOWED
 		{
 			name: "allows custom string type alias",
-			registerFunc: func() error {
-				return Register[AddressString](rm, "2023-02-15", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[AddressString]("2023-02-15", &dummyMigration{})).Build()
 			},
 			wantErr: false,
 		},
 		{
 			name: "allows struct type",
-			registerFunc: func() error {
-				return Register[profile](rm, "2023-02-15", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[profile]("2023-02-15", &dummyMigration{})).Build()
 			},
 			wantErr: false,
 		},
 		{
 			name: "allows named slice type",
-			registerFunc: func() error {
-				return Register[NamedSlice](rm, "2023-02-15", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[NamedSlice]("2023-02-15", &dummyMigration{})).Build()
 			},
 			wantErr: false,
 		},
 		{
 			name: "allows named map type",
-			registerFunc: func() error {
-				return Register[NamedMap](rm, "2023-02-15", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[NamedMap]("2023-02-15", &dummyMigration{})).Build()
 			},
 			wantErr: false,
 		},
 		{
 			name: "allows named int slice type",
-			registerFunc: func() error {
-				return Register[NamedIntSlice](rm, "2023-02-15", &dummyMigration{})
+			registerFunc: func(rm *RequestMigration) error {
+				return rm.Register(Migration[NamedIntSlice]("2023-02-15", &dummyMigration{})).Build()
 			},
 			wantErr: false,
 		},
@@ -399,7 +400,10 @@ func Test_MigrationTypeValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.registerFunc()
+			rm, err := NewRequestMigration(opts)
+			require.NoError(t, err)
+
+			err = tc.registerFunc(rm)
 			if tc.wantErr {
 				require.Error(t, err)
 				require.ErrorIs(t, err, ErrNativeTypeMigration)
@@ -485,16 +489,13 @@ func Test_Cycles(t *testing.T) {
 		VersionFormat:  DateFormat,
 	}
 
-	t.Run("build graph with cycles", func(t *testing.T) {
-		rm, _ := NewRequestMigration(opts)
-		_, err := rm.graphBuilder.buildFromType(reflect.TypeOf(CyclicUser{}), &Version{Format: DateFormat, Value: "2023-01-01"})
-		require.NoError(t, err)
-	})
-
 	t.Run("marshal cyclic structure with migrations", func(t *testing.T) {
 		rm, _ := NewRequestMigration(opts)
-		Register[CyclicUser](rm, "2023-03-01", &cyclicUserMigration{})
-		Register[CyclicWorkspace](rm, "2023-03-01", &cyclicWorkspaceMigration{})
+		err := rm.Register(
+			Migration[CyclicUser]("2023-03-01", &cyclicUserMigration{}),
+			Migration[CyclicWorkspace]("2023-03-01", &cyclicWorkspaceMigration{}),
+		).Build()
+		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Add("X-Test-Version", "2023-01-01") // old version
@@ -539,8 +540,11 @@ func Test_Cycles(t *testing.T) {
 
 	t.Run("unmarshal cyclic structure with migrations", func(t *testing.T) {
 		rm, _ := NewRequestMigration(opts)
-		Register[CyclicUser](rm, "2023-03-01", &cyclicUserMigration{})
-		Register[CyclicWorkspace](rm, "2023-03-01", &cyclicWorkspaceMigration{})
+		err := rm.Register(
+			Migration[CyclicUser]("2023-03-01", &cyclicUserMigration{}),
+			Migration[CyclicWorkspace]("2023-03-01", &cyclicWorkspaceMigration{}),
+		).Build()
+		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		req.Header.Add("X-Test-Version", "2023-01-01") // old version
@@ -582,8 +586,11 @@ func Test_Cycles(t *testing.T) {
 
 	t.Run("deeply nested cycles", func(t *testing.T) {
 		rm, _ := NewRequestMigration(opts)
-		Register[CyclicUser](rm, "2023-03-01", &cyclicUserMigration{})
-		Register[CyclicWorkspace](rm, "2023-03-01", &cyclicWorkspaceMigration{})
+		err := rm.Register(
+			Migration[CyclicUser]("2023-03-01", &cyclicUserMigration{}),
+			Migration[CyclicWorkspace]("2023-03-01", &cyclicWorkspaceMigration{}),
+		).Build()
+		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Add("X-Test-Version", "2023-01-01")
@@ -649,7 +656,10 @@ func Test_RootSlice(t *testing.T) {
 		VersionFormat:  DateFormat,
 	}
 	rm, _ := NewRequestMigration(opts)
-	Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+	err := rm.Register(
+		Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+	).Build()
+	require.NoError(t, err)
 
 	tests := []struct {
 		name              string
@@ -752,9 +762,12 @@ func Test_VersionChain(t *testing.T) {
 
 	// v1: 2023-01-01 (initial version, no migrations)
 	// v2: 2023-02-01
-	Register[AddressString](rm, "2023-02-01", &chainMigrationV2{})
 	// v3: 2023-03-01
-	Register[AddressString](rm, "2023-03-01", &chainMigrationV3{})
+	err := rm.Register(
+		Migration[AddressString]("2023-02-01", &chainMigrationV2{}),
+		Migration[AddressString]("2023-03-01", &chainMigrationV3{}),
+	).Build()
+	require.NoError(t, err)
 
 	t.Run("Marshal chain v3 to v1", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -841,7 +854,9 @@ func Test_InterfaceFieldMigration(t *testing.T) {
 	rm, err := NewRequestMigration(opts)
 	require.NoError(t, err)
 
-	err = Register[EndpointResponse](rm, "2024-01-01", &endpointMigration{})
+	err = rm.Register(
+		Migration[EndpointResponse]("2024-01-01", &endpointMigration{}),
+	).Build()
 	require.NoError(t, err)
 
 	t.Run("Marshal single item in interface field", func(t *testing.T) {
@@ -990,7 +1005,9 @@ func Test_NestedInterfaceSliceMigration(t *testing.T) {
 	rm, err := NewRequestMigration(opts)
 	require.NoError(t, err)
 
-	err = Register[EndpointResponse](rm, "2024-01-01", &endpointMigration{})
+	err = rm.Register(
+		Migration[EndpointResponse]("2024-01-01", &endpointMigration{}),
+	).Build()
 	require.NoError(t, err)
 
 	t.Run("Marshal pointer slice in interface field", func(t *testing.T) {
@@ -1030,7 +1047,10 @@ func Test_NestedPointers(t *testing.T) {
 		VersionFormat:  DateFormat,
 	}
 	rm, _ := NewRequestMigration(opts)
-	Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+	err := rm.Register(
+		Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+	).Build()
+	require.NoError(t, err)
 
 	t.Run("Marshal with double pointer", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -1114,6 +1134,9 @@ func Test_ForNilRequest(t *testing.T) {
 	rm, err := NewRequestMigration(opts)
 	require.NoError(t, err)
 
+	err = rm.Build()
+	require.NoError(t, err)
+
 	t.Run("For returns error on nil request", func(t *testing.T) {
 		migrator, err := rm.For(nil)
 		require.Error(t, err)
@@ -1131,6 +1154,9 @@ func Test_BindAlias(t *testing.T) {
 	rm, err := NewRequestMigration(opts)
 	require.NoError(t, err)
 
+	err = rm.Build()
+	require.NoError(t, err)
+
 	t.Run("Bind is alias for For", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Add("X-Test-Version", "2023-02-01")
@@ -1141,50 +1167,49 @@ func Test_BindAlias(t *testing.T) {
 	})
 }
 
-// Test_EagerGraphBuilding tests that graphs are built at registration time
+// Test_EagerGraphBuilding tests that graphs are built at Build time
 func Test_EagerGraphBuilding(t *testing.T) {
 	opts := &RequestMigrationOptions{
 		VersionHeader:  "X-Test-Version",
 		CurrentVersion: "2023-03-01",
 		VersionFormat:  DateFormat,
 	}
-	rm, err := NewRequestMigration(opts)
-	require.NoError(t, err)
 
-	t.Run("graph is cached after registration", func(t *testing.T) {
-		// Register a migration
-		err := Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+	t.Run("graph is cached after Build", func(t *testing.T) {
+		rm, err := NewRequestMigration(opts)
 		require.NoError(t, err)
 
-		// Check that the graph was cached for all known versions
-		// The versions are: initial (0001-01-01) and 2023-03-01
+		err = rm.Register(
+			Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+		).Build()
+		require.NoError(t, err)
+
 		key := graphCacheKey{
 			t:       reflect.TypeOf(AddressString("")),
 			version: "2023-03-01",
 		}
 
 		cached, ok := rm.graphCache.Load(key)
-		require.True(t, ok, "graph should be cached after registration")
+		require.True(t, ok, "graph should be cached after Build")
 		require.NotNil(t, cached)
 
 		graph := cached.(*typeGraph)
 		require.NotNil(t, graph)
 	})
 
-	t.Run("immediate use after registration - no Finalize needed", func(t *testing.T) {
-		// Create fresh instance
-		rm2, err := NewRequestMigration(opts)
+	t.Run("use after Build", func(t *testing.T) {
+		rm, err := NewRequestMigration(opts)
 		require.NoError(t, err)
 
-		// Register migration
-		err = Register[AddressString](rm2, "2023-03-01", &addressStringMigration{})
+		err = rm.Register(
+			Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+		).Build()
 		require.NoError(t, err)
 
-		// Use immediately - should work without any Finalize() call
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Add("X-Test-Version", "2023-02-01")
 
-		migrator, err := rm2.For(req)
+		migrator, err := rm.For(req)
 		require.NoError(t, err)
 
 		u := CustomUser{Address: "123 Main St"}
@@ -1207,8 +1232,9 @@ func Test_LazyFallback(t *testing.T) {
 	rm, err := NewRequestMigration(opts)
 	require.NoError(t, err)
 
-	// Only register AddressString migration, NOT any container type
-	err = Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+	err = rm.Register(
+		Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+	).Build()
 	require.NoError(t, err)
 
 	t.Run("unregistered container with registered field - marshal", func(t *testing.T) {
@@ -1289,7 +1315,7 @@ func Test_LazyFallback(t *testing.T) {
 	})
 }
 
-// Test_ConcurrentAccess tests that concurrent access is safe
+// Test_ConcurrentAccess tests that concurrent access is safe after Build
 func Test_ConcurrentAccess(t *testing.T) {
 	opts := &RequestMigrationOptions{
 		VersionHeader:  "X-Test-Version",
@@ -1301,7 +1327,9 @@ func Test_ConcurrentAccess(t *testing.T) {
 		rm, err := NewRequestMigration(opts)
 		require.NoError(t, err)
 
-		err = Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+		err = rm.Register(
+			Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+		).Build()
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -1310,7 +1338,6 @@ func Test_ConcurrentAccess(t *testing.T) {
 		migrator, err := rm.For(req)
 		require.NoError(t, err)
 
-		// Concurrent marshals should work safely
 		var wg sync.WaitGroup
 		for i := 0; i < 100; i++ {
 			wg.Add(1)
@@ -1328,7 +1355,9 @@ func Test_ConcurrentAccess(t *testing.T) {
 		rm, err := NewRequestMigration(opts)
 		require.NoError(t, err)
 
-		err = Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+		err = rm.Register(
+			Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+		).Build()
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -1337,13 +1366,10 @@ func Test_ConcurrentAccess(t *testing.T) {
 		migrator, err := rm.For(req)
 		require.NoError(t, err)
 
-		// Type defined inside test — never registered
 		type ConcurrentUnregistered struct {
 			Address AddressString `json:"address"`
 		}
 
-		// Multiple goroutines hitting lazy fallback for same unregistered type
-		// Tests that idempotent builds + sync.Map handle races correctly
 		var wg sync.WaitGroup
 		for i := 0; i < 50; i++ {
 			wg.Add(1)
@@ -1359,41 +1385,17 @@ func Test_ConcurrentAccess(t *testing.T) {
 		wg.Wait()
 	})
 
-	t.Run("concurrent registration and use", func(t *testing.T) {
+	t.Run("For returns error before Build", func(t *testing.T) {
 		rm, err := NewRequestMigration(opts)
 		require.NoError(t, err)
 
-		var wg sync.WaitGroup
+		rm.Register(Migration[AddressString]("2023-03-01", &addressStringMigration{}))
 
-		// Start registration goroutines
-		for i := 0; i < 10; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				// Registration may happen multiple times (idempotent)
-				Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
-			}()
-		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Add("X-Test-Version", "2023-02-01")
 
-		// Start usage goroutines concurrently with registration
-		for i := 0; i < 50; i++ {
-			wg.Add(1)
-			go func(idx int) {
-				defer wg.Done()
-				req := httptest.NewRequest(http.MethodGet, "/", nil)
-				req.Header.Add("X-Test-Version", "2023-02-01")
-
-				migrator, err := rm.For(req)
-				if err != nil {
-					return // Skip if version not ready yet
-				}
-
-				u := CustomUser{Address: AddressString(fmt.Sprintf("Street %d", idx))}
-				_, _ = migrator.Marshal(&u) // May or may not have migration applied
-			}(i)
-		}
-
-		wg.Wait()
+		_, err = rm.For(req)
+		require.ErrorIs(t, err, ErrNotBuilt)
 	})
 }
 
@@ -1407,8 +1409,9 @@ func Test_MarshalCacheLookup(t *testing.T) {
 	rm, err := NewRequestMigration(opts)
 	require.NoError(t, err)
 
-	// Register migration - this builds and caches graph for AddressString
-	err = Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+	err = rm.Register(
+		Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+	).Build()
 	require.NoError(t, err)
 
 	t.Run("marshal uses cached graph for registered type", func(t *testing.T) {
@@ -1438,14 +1441,19 @@ func Test_MarshalCacheLookup(t *testing.T) {
 	})
 
 	t.Run("marshal still works for types with interface fields", func(t *testing.T) {
-		// PagedResponse has interface{} field, so it needs runtime inspection
-		err := Register[EndpointResponse](rm, "2024-01-01", &endpointMigration{})
+		rm2, err := NewRequestMigration(opts)
+		require.NoError(t, err)
+
+		err = rm2.Register(
+			Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+			Migration[EndpointResponse]("2024-01-01", &endpointMigration{}),
+		).Build()
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Add("X-Test-Version", "2023-01-01")
 
-		migrator, err := rm.For(req)
+		migrator, err := rm2.For(req)
 		require.NoError(t, err)
 
 		wrapper := &PagedResponse{
@@ -1473,7 +1481,9 @@ func Test_NoMigrationFastPath(t *testing.T) {
 	rm, err := NewRequestMigration(opts)
 	require.NoError(t, err)
 
-	err = Register[AddressString](rm, "2023-03-01", &addressStringMigration{})
+	err = rm.Register(
+		Migration[AddressString]("2023-03-01", &addressStringMigration{}),
+	).Build()
 	require.NoError(t, err)
 
 	t.Run("current version marshal - no transformation", func(t *testing.T) {
@@ -1560,8 +1570,9 @@ func Test_GenericTypes(t *testing.T) {
 
 	rm, _ := NewRequestMigration(opts)
 
-	// Register migration for the nested Product type
-	err := Register[Product](rm, "2023-03-01", &productMigration{})
+	err := rm.Register(
+		Migration[Product]("2023-03-01", &productMigration{}),
+	).Build()
 	require.NoError(t, err)
 
 	t.Run("generic type with migrated nested type - marshal", func(t *testing.T) {
