@@ -95,9 +95,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Register migrations across versions
-	rms.Register[User](rm, "2023-06-01", &UserMigrationV20230601{})
-	rms.Register[Workspace](rm, "2024-01-01", &WorkspaceMigrationV20240101{})
+	err = rm.Register(
+		rms.Migration[User]("2023-06-01", &UserMigrationV20230601{}),
+		rms.Migration[Workspace]("2024-01-01", &WorkspaceMigrationV20240101{}),
+	).Build()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// --- Scenario: Backward Migration (Marshal) ---
 	// Current data structure

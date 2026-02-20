@@ -27,9 +27,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Register migrations for the User and profile types
-	rms.Register[User](rm, "2023-05-01", &UserMigration{})
-	rms.Register[profile](rm, "2023-05-01", &ProfileMigration{})
+	err = rm.Register(
+		rms.Migration[User]("2023-05-01", &UserMigration{}),
+		rms.Migration[profile]("2023-05-01", &ProfileMigration{}),
+	).Build()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	api := &API{rm: rm, store: userStore}
 	backend := http.Server{
